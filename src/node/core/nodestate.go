@@ -27,23 +27,27 @@ type LogEntry struct {
 type Node struct {
 	mu sync.Mutex
 	// Always non-zero, unique among cluster.
-	nodeId         int
-	role           NodeRole
-	clusterMembers map[int]bool
-	leaderId       int
+	NodeId         int
+	Role           NodeRole
+	ClusterMembers map[int]bool
+	LeaderId       int
 
 	// Common state on all nodes.
-	commitIndex int
-	lastApplied int
+	CommitIndex int
+	LastApplied int
 
 	// Always persisted on disk. (can be improved)
-	currentTerm int
-	votedFor    int
-	localLog    []LogEntry
+	CurrentTerm int
+	VotedFor    int
+	LocalLog    []LogEntry
 
 	// Leader specific states.
-	nextIndex  map[int]int
-	matchIndex map[int]int
+	NextIndex  map[int]int
+	MatchIndex map[int]int
+}
+
+func (node *Node) Init() {
+	// TODO: Implement this.
 }
 
 // AppendEntries related struct/method.
@@ -63,32 +67,32 @@ type AppendEntriesResponse struct {
 
 func (node *Node) AppendEntries(args *AppendEntriesRequest) AppendEntriesResponse {
 	node.mu.Lock()
-	node.leaderId = args.LeaderId
+	node.LeaderId = args.LeaderId
 
 	// Failure cases.
-	if args.Term < node.currentTerm || len(node.localLog) <= args.PrevLogIndex ||
-		node.localLog[args.PrevLogIndex].termReceived == args.PrevLogTerm {
+	if args.Term < node.CurrentTerm || len(node.LocalLog) <= args.PrevLogIndex ||
+		node.LocalLog[args.PrevLogIndex].termReceived == args.PrevLogTerm {
 		node.mu.Unlock()
-		return AppendEntriesResponse{false, node.currentTerm}
+		return AppendEntriesResponse{false, node.CurrentTerm}
 	}
 
 	// Success cases.
-	logSize := len(node.localLog)
+	logSize := len(node.LocalLog)
 	startAppend := false
 	for i, v := range args.Entries {
 		startAppend = startAppend || args.PrevLogIndex+i+1 >= logSize
 		if startAppend {
-			node.localLog = append(node.localLog, LogEntry{args.Term, v})
+			node.LocalLog = append(node.LocalLog, LogEntry{args.Term, v})
 			continue
 		}
-		node.localLog[args.PrevLogIndex+i+1] = LogEntry{args.Term, v}
+		node.LocalLog[args.PrevLogIndex+i+1] = LogEntry{args.Term, v}
 	}
-	newCommitIndex := math.Max(float64(node.commitIndex), math.Min(float64(args.LeaderCommitIndex), float64(len(node.localLog)-1)))
-	node.commitIndex = int(newCommitIndex)
+	newCommitIndex := math.Max(float64(node.CommitIndex), math.Min(float64(args.LeaderCommitIndex), float64(len(node.LocalLog)-1)))
+	node.CommitIndex = int(newCommitIndex)
 	node.applyLog()
-	node.currentTerm = args.Term
+	node.CurrentTerm = args.Term
 	node.mu.Unlock()
-	return AppendEntriesResponse{true, node.currentTerm}
+	return AppendEntriesResponse{true, node.CurrentTerm}
 }
 
 // RequestVode related struct/method.
@@ -106,41 +110,51 @@ type RequestVoteResponse struct {
 
 func (node *Node) RequestVote(args *RequestVoteRequest) RequestVoteResponse {
 	node.mu.Lock()
-	if args.Term < node.currentTerm {
+	if args.Term < node.CurrentTerm {
 		node.mu.Unlock()
-		return RequestVoteResponse{node.currentTerm, false}
+		return RequestVoteResponse{node.CurrentTerm, false}
 	}
-	if node.votedFor != 0 && node.votedFor != args.CandidateId {
+	if node.VotedFor != 0 && node.VotedFor != args.CandidateId {
 		node.mu.Unlock()
-		return RequestVoteResponse{node.currentTerm, false}
+		return RequestVoteResponse{node.CurrentTerm, false}
 	}
-	if args.LastLogIndex >= len(node.localLog) {
+	if args.LastLogIndex >= len(node.LocalLog) {
 		node.mu.Unlock()
-		return RequestVoteResponse{node.currentTerm, false}
+		return RequestVoteResponse{node.CurrentTerm, false}
 	}
 
-	nodeLastLogTerm := node.localLog[len(node.localLog)-1].termReceived
+	nodeLastLogTerm := node.LocalLog[len(node.LocalLog)-1].termReceived
 	if args.LastLogTerm >= nodeLastLogTerm {
-		node.currentTerm = args.Term
+		node.CurrentTerm = args.Term
 		node.mu.Unlock()
-		return RequestVoteResponse{node.currentTerm, true}
+		return RequestVoteResponse{node.CurrentTerm, true}
 	} else {
 		node.mu.Unlock()
-		return RequestVoteResponse{node.currentTerm, false}
+		return RequestVoteResponse{node.CurrentTerm, false}
 	}
 }
 
 // Role change function to be called by controller, where appropriate.
 func (node *Node) UpdateRole(newRole NodeRole) {
 	// TODO: Expand this method when we add more role change logic.
-	node.role = newRole
+	node.Role = newRole
+}
+
+func (node *Node) AddMembers(newMembers *[]int) {
+	node.mu.Lock()
+	for _, nodeId := range *newMembers {
+		node.ClusterMembers[nodeId] = true
+	}
+	node.mu.Unlock()
 }
 
 // Updates lastApplied and applies command to local state machine.
 func (node *Node) applyLog() {
-	if node.lastApplied < node.commitIndex {
+	node.mu.Lock()
+	if node.LastApplied < node.CommitIndex {
 		// TODO: Implement this when building service on top of RAFT.
 	}
-	node.lastApplied = node.commitIndex
+	node.LastApplied = node.CommitIndex
+	node.mu.Unlock()
 	return
 }
