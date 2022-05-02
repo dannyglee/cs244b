@@ -19,13 +19,16 @@ package raft
 
 import (
 	//	"bytes"
+	// "math"
+	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	//	"6.824/labgob"
 	"6.824/labrpc"
 )
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -50,6 +53,10 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+type LogEntry struct {
+	Term int64
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -63,17 +70,19 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	currentTerm int64       // The term me is in
+	currentLeader int       // The server which me believes is the leader for currentTerm; -1 means leader is unknown 
+	lastHeardFromLeaderTime time.Time  // The most recent time when me is contacted by the leader; ignored if me is the leader
+	votedFor map[int64]int  // Term -> the index of the candidate me votes for for the term
+	log []LogEntry
 
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
 	// Your code here (2A).
-	return term, isleader
+	return int(rf.currentTerm), rf.currentLeader == rf.me
 }
 
 //
@@ -143,6 +152,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term int64
+	CandidateId int
+	LastLogIndex int
+	LastLogTerm int64
 }
 
 //
@@ -151,6 +164,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term int64
+	VoteGranted bool
 }
 
 //
@@ -158,7 +173,69 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
+		return
+	}
+	if rf.compareLogUpToDate(args.LastLogIndex, args.LastLogTerm) < 0 {
+		// My own log is more up-to-date.
+		reply.VoteGranted = false
+		return
+	}
+	if voted_candidate, ok := rf.votedFor[args.Term]; ok && voted_candidate != args.CandidateId {
+		// Already voted for someone else.
+		reply.VoteGranted = false
+		return 
+	}
+	rf.votedFor[args.Term] = args.CandidateId
+	reply.VoteGranted = true
 }
+
+type AppendEntriesArgs struct {
+	Term int64
+	LeaderId int
+	// prevLogIdx int
+	// prevLogTerm int
+	Entries []LogEntry
+	// leaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term int64
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// TODO-1: for now AppendEntries only handle heartbeats
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		// Stale leader, reject the request
+		reply.Success = false
+		return
+	} 
+	if args.Term > rf.currentTerm {
+		// A new leader is elected for a future term; accept it
+		rf.currentTerm = args.Term
+		rf.currentLeader = args.LeaderId
+		reply.Success = true
+		return
+	}
+	if rf.currentLeader != -1 && rf.currentLeader != args.LeaderId {
+		panic(fmt.Sprintf("Fata bug: the same view %d has two different leaders: %d and %d", 
+		args.Term, rf.currentLeader, args.LeaderId))
+	}
+	if (rf.currentLeader == -1) {
+		// Learned about the leader of this term
+		rf.currentLeader = args.LeaderId
+	}
+	rf.lastHeardFromLeaderTime = time.Now()
+    reply.Success = true
+} 
 
 //
 // example code to send a RequestVote RPC to a server.
@@ -191,6 +268,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -241,15 +323,104 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+// The base time to wait before starting a leader election. The actual wait time
+// is randomized; see randomSleep for more detail
+const kStartElectionTimeout time.Duration = 1 * time.Second
+// The time interval between two consecutive heartbeat messages
+const kHeartbeatRoundInterval time.Duration = 100 * time.Millisecond
+// The maximum time to wait before aborting the current leader election
+const kElectionRoundTimeout time.Duration = 5 * time.Millisecond
+// The time interval between sending two rpc requests
+const kRpcInterval time.Duration = time.Millisecond
+
+
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
+	// TODO(jin): in initial start, do not wait for timeout; directly start a new election
 	for rf.killed() == false {
-
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
+		if (rf.leaderTimesOut()) {
+			rf.mu.Lock()
+			rf.currentTerm++
+			rf.currentLeader = -1
+			rf.votedFor[rf.currentTerm] = rf.me
+			startTime := time.Now()
 
+			term := rf.currentTerm
+			me := rf.me
+			lastLogIdx, lastLogTerm := rf.getLastLogIndexAndTerm()
+			
+			var roundLock sync.Mutex
+			voteCount := 1
+			yesVoteCount := 1  // Always vote for myself.
+			for i := 0; i < len(rf.peers); i++ {
+				if i == rf.me {
+					continue
+				}
+				go func (dest int) {
+					var reply RequestVoteReply
+					for {			
+						if rf.sendRequestVote(dest, &RequestVoteArgs{term, me, lastLogIdx, lastLogTerm}, &reply) {
+							break
+						}
+						time.Sleep(kRpcInterval)
+					}
+					roundLock.Lock()
+					voteCount++
+					if reply.VoteGranted {
+					    yesVoteCount++
+					}
+					roundLock.Unlock()
+				} (i)
+			}
+			// Waiting for the election result
+			for {
+				roundLock.Lock()
+				if yesVoteCount >= len(rf.peers) / 2 + 1  || voteCount == len(rf.peers) || time.Now().Sub(startTime) > kElectionRoundTimeout {
+					roundLock.Unlock()
+					break
+				}
+				roundLock.Unlock()
+				time.Sleep(time.Millisecond)
+			}
+			electionSucceeds := yesVoteCount >= len(rf.peers) / 2 + 1
+			rf.mu.Unlock()
+			if electionSucceeds {
+				rf.becomeNewLeader()
+			}
+		}
+		randomSleep()
+	}
+}
+
+func (rf *Raft) periodicHeartbeatIfIsLeader() {
+	for rf.killed() == false {
+		rf.mu.Lock()
+		if (rf.currentLeader == rf.me) {
+			// Only send out heartbeats when I think I am the leader.
+			term := rf.currentTerm
+			leaderId := rf.me
+			entries := make([]LogEntry, 0)
+			for i := 0; i < len(rf.peers); i++ {
+				if i == rf.me {
+					continue
+				}
+				go func(dest int) {
+					// TODO(jin): what should we do with the reply? Should the leader steps down once 
+					// receiving a larger term?
+					var reply AppendEntriesReply
+					// It is ok for this rpc to fail in this round; we will always retry it in the next
+					// round.
+					rf.sendAppendEntries(dest, &AppendEntriesArgs{term, leaderId, entries}, &reply)
+					
+				}(i)
+			}
+		}
+		rf.mu.Unlock()
+		time.Sleep(kHeartbeatRoundInterval)
 	}
 }
 
@@ -272,13 +443,70 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.currentTerm = 0
+	rf.currentLeader = -1
+	rf.lastHeardFromLeaderTime = time.Time{}
+	rf.votedFor = make(map[int64]int)
+	rf.log = make([]LogEntry, 10)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.periodicHeartbeatIfIsLeader()
 
 
 	return rf
+}
+
+func (rf *Raft) leaderTimesOut() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.currentLeader == rf.me {
+		return false
+	}
+	return rf.currentLeader == -1 || time.Now().Sub(rf.lastHeardFromLeaderTime) < kStartElectionTimeout
+}
+
+func (rf *Raft) becomeNewLeader() {
+	// TODO: implement
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.currentLeader = rf.me
+}
+
+func randomSleep() {
+	s := rand.NewSource(time.Now().UnixNano())
+    r := rand.New(s)
+	duration := (r.Intn(3) + 1) * int(kStartElectionTimeout)
+	time.Sleep(time.Duration(duration));
+}
+
+// Not thread-safe
+func (rf *Raft) getLastLogIndexAndTerm() (int, int64) {
+	var lastLogIdx int;
+	var lastLogTerm int64;
+	if len(rf.log) == 0 {
+		lastLogIdx = -1
+		lastLogTerm = -1
+	} else {
+		lastLogIdx = len(rf.log) - 1
+		lastLogTerm = rf.log[lastLogIdx].Term
+	}
+	return lastLogIdx, lastLogTerm
+}
+
+// Returns 1 if my log is strictly more up-to-date, -1 if the given log is, and 0 when
+// the two logs are equally up-to-date.
+// Not thread-safe. 
+func (rf *Raft) compareLogUpToDate(lastLogIndex int, lastLogTerm int64) int {
+	myLastLogIndex, myLastLogTerm := rf.getLastLogIndexAndTerm()
+	if myLastLogTerm == lastLogTerm && myLastLogIndex == lastLogIndex {
+		return 0
+	}
+	if myLastLogTerm > lastLogTerm || myLastLogTerm == lastLogTerm && myLastLogIndex > lastLogIndex {
+		return 1
+	}
+	return -1
 }
