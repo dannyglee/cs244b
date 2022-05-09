@@ -1,4 +1,4 @@
-package httpclient
+package core
 
 import (
 	"bytes"
@@ -18,6 +18,28 @@ type HttpClient struct {
 	NodeId int
 }
 
+func (client *HttpClient) RequestVote(targetNodeId int, args *RequestVoteRequest) *RequestVoteResponse {
+	postBody, _ := json.Marshal(*args)
+	postBuffer := bytes.NewBuffer(postBody)
+	resp, _ := http.Post(fmt.Sprintf("%s/requestVote", client.NodeUrls[targetNodeId]), "application/json", postBuffer)
+	body, _ := io.ReadAll(resp.Body)
+	defer resp.Body.Close()
+	responseData := RequestVoteResponse{}
+	json.Unmarshal(body, &responseData)
+	return &responseData
+}
+
+func (client *HttpClient) AppendEntries(targetNodeId int, args *AppendEntriesRequest) *AppendEntriesResponse {
+	postBody, _ := json.Marshal(*args)
+	postBuffer := bytes.NewBuffer(postBody)
+	resp, _ := http.Post(fmt.Sprintf("%s/appendEntries", client.NodeUrls[targetNodeId]), "application/json", postBuffer)
+	body, _ := io.ReadAll(resp.Body)
+	defer resp.Body.Close()
+	responseData := AppendEntriesResponse{}
+	json.Unmarshal(body, &responseData)
+	return &responseData
+}
+
 func (client *HttpClient) AddNewMember(targetNodeId int, ackChannel chan bool) {
 	postBody, _ := json.Marshal([]int{client.NodeId})
 	postBuffer := bytes.NewBuffer(postBody)
@@ -31,8 +53,8 @@ func (client *HttpClient) AddNewMember(targetNodeId int, ackChannel chan bool) {
 
 func (client *HttpClient) RegisterNewNode(nodeId, port int) map[int]bool {
 	resp, _ := http.Get(fmt.Sprintf("%s/register?nodeId=%d&port=%d", client.RegistryUrl, nodeId, port))
-	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	defer resp.Body.Close()
 	json.Unmarshal(body, &client.NodeUrls)
 	keys := map[int]bool{}
 	for k := range client.NodeUrls {

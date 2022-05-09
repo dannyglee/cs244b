@@ -20,9 +20,9 @@ func userCommandHandler(server httpserver.RaftServer) {
 		userCommand := scanner.Text()
 		switch userCommand {
 		case "showLog":
-			fmt.Println(fmt.Sprintf("%v", server.Controller.Node.LocalLog))
+			fmt.Println(fmt.Sprintf("%v", server.Node.LocalLog))
 		case "showMembers":
-			fmt.Println(fmt.Sprintf("%v", server.Controller.Node.ClusterMembers))
+			fmt.Println(fmt.Sprintf("%v", server.Node.ClusterMembers))
 		default:
 			fmt.Println("Command not supported")
 		}
