@@ -6,9 +6,11 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 )
 
 func main() {
+	fmt.Printf("Process started at %d\n", time.Now().UnixMilli())
 	wg := new(sync.WaitGroup)
 	wg.Add(2)
 
@@ -17,10 +19,10 @@ func main() {
 
 	http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
 		nodeId := r.FormValue("nodeId")
-		portNumber := r.FormValue("port")
+		url := r.FormValue("url")
 		bytes, _ := json.Marshal(activeNodes)
-		activeNodes[nodeId] = fmt.Sprintf("http://localhost:%s", portNumber)
-		fmt.Println(fmt.Sprintf("Node %s started serving at port %s", nodeId, portNumber))
+		activeNodes[nodeId] = url
+		fmt.Println(fmt.Sprintf("Node %s started serving at %s", nodeId, url))
 		w.Write(bytes)
 	})
 

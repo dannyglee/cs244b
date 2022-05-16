@@ -1,0 +1,5 @@
+Process started at 1652659661734
+RAFT NODE INITIALIZED - nodeId: 2, serving at http://localhost:4002
+---------------------
+http://localhost:4003
+Node 2 received membership change

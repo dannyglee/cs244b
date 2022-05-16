@@ -1,0 +1,11 @@
+Process started at 1652659658684
+RAFT NODE INITIALIZED - nodeId: 1, serving at http://localhost:4001
+---------------------
+changed to candidate
+Node 1 elected leader
+http://localhost:4002
+Node 1 received membership change
+http://localhost:4003
+Node 1 received membership change
+client request called
+user command 0 committed

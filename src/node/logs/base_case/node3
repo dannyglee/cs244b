@@ -1,0 +1,5 @@
+Process started at 1652659661747
+RAFT NODE INITIALIZED - nodeId: 3, serving at http://localhost:4003
+---------------------
+changed to candidate
+Node 3 elected leader
