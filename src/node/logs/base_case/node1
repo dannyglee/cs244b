@@ -1,11 +1,17 @@
-Process started at 1652659658684
+Process started at 1652776087381
 RAFT NODE INITIALIZED - nodeId: 1, serving at http://localhost:4001
 ---------------------
 changed to candidate
 Node 1 elected leader
-http://localhost:4002
-Node 1 received membership change
-http://localhost:4003
-Node 1 received membership change
+Node 2 added to cluster
+Node 3 added to cluster
 client request called
-user command 0 committed
+client request called
+client request called
+client request called
+client request called
+Node 4 added to cluster
+Node 5 added to cluster
+client request called
+client request called
+client request called

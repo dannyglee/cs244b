@@ -30,6 +30,8 @@ type LogEntry struct {
 type Node struct {
 	mu sync.Mutex
 
+	perMemberLock *LockMap
+
 	rpcClient *HttpClient
 
 	heartbeatIntervalMillis int64
@@ -92,9 +94,9 @@ func (node *Node) AppendEntries(args *AppendEntriesRequest) AppendEntriesRespons
 	// Early success case.
 	if args.PrevLogIndex == -1 {
 		node.LeaderId = args.LeaderId
-		node.Role = Follower
-		node.lastUpdateEpoch = time.Now().UnixMilli()
-		return node.appendEntriesSuccess(args)
+		node.changeToFollower(args.Term)
+		resp := node.appendEntriesSuccess(args)
+		return resp
 	}
 
 	// Failure cases.
@@ -102,14 +104,14 @@ func (node *Node) AppendEntries(args *AppendEntriesRequest) AppendEntriesRespons
 		return AppendEntriesResponse{false, node.CurrentTerm, false}
 	}
 	node.LeaderId = args.LeaderId
-	node.Role = Follower
-	node.lastUpdateEpoch = time.Now().UnixMilli()
+	node.changeToFollower(args.Term)
 	if len(node.LocalLog) <= args.PrevLogIndex || node.LocalLog[args.PrevLogIndex].termReceived != args.PrevLogTerm {
 		return AppendEntriesResponse{false, node.CurrentTerm, false}
 	}
 
 	// Success cases.
-	return node.appendEntriesSuccess(args)
+	resp := node.appendEntriesSuccess(args)
+	return resp
 }
 
 func (node *Node) appendEntriesSuccess(args *AppendEntriesRequest) AppendEntriesResponse {
@@ -119,15 +121,22 @@ func (node *Node) appendEntriesSuccess(args *AppendEntriesRequest) AppendEntries
 		startAppend = startAppend || args.PrevLogIndex+i+1 >= logSize
 		if startAppend {
 			node.LocalLog = append(node.LocalLog, LogEntry{args.Term, v})
-			continue
+		} else {
+			node.LocalLog[args.PrevLogIndex+i+1] = LogEntry{args.Term, v}
 		}
-		node.LocalLog[args.PrevLogIndex+i+1] = LogEntry{args.Term, v}
 	}
 	newCommitIndex := math.Max(float64(node.CommitIndex), math.Min(float64(args.LeaderCommitIndex), float64(len(node.LocalLog)-1)))
 	node.CommitIndex = int(newCommitIndex)
 	node.applyLog()
-	node.CurrentTerm = args.Term
 	return AppendEntriesResponse{true, node.CurrentTerm, false}
+}
+
+func (node *Node) applyLog() {
+	if node.LastApplied < node.CommitIndex {
+		fmt.Println(fmt.Sprintf("Log index %d to %d applied at node %d, values are %v",
+			node.LastApplied+1, node.CommitIndex, node.NodeId, node.LocalLog[node.LastApplied+1:node.CommitIndex+1]))
+	}
+	node.LastApplied = node.CommitIndex
 }
 
 func (node *Node) RequestVote(args *RequestVoteRequest) RequestVoteResponse {
@@ -137,13 +146,12 @@ func (node *Node) RequestVote(args *RequestVoteRequest) RequestVoteResponse {
 		return RequestVoteResponse{node.CurrentTerm, false, false}
 	}
 	if args.Term > node.CurrentTerm {
-		node.Role = Follower
-		node.VotedFor = -1
+		node.changeToFollower(args.Term)
 	}
 	if node.VotedFor != -1 && node.VotedFor != args.CandidateId {
 		return RequestVoteResponse{node.CurrentTerm, false, false}
 	}
-	if args.LastLogIndex >= len(node.LocalLog) {
+	if args.LastLogIndex < len(node.LocalLog)-1 {
 		return RequestVoteResponse{node.CurrentTerm, false, false}
 	}
 	nodeLastLogTerm := -1
@@ -165,13 +173,11 @@ func (node *Node) Init(nodeId int, url string) {
 	node.rpcClient = &HttpClient{RegistryUrl: "http://localhost:5000/", NodeId: nodeId}
 	node.NextIndex = make(map[int]int)
 	node.MatchIndex = make(map[int]int)
-	node.Role = Follower
-	node.CurrentTerm = 0
-	node.VotedFor = -1
+	node.changeToFollower(0)
 	node.LocalLog = []LogEntry{}
-	node.lastUpdateEpoch = time.Now().UnixMilli()
 	node.heartbeatIntervalMillis = 50
 	node.electionTimeoutMillis = int64(math.Min(math.Max(rand.NormFloat64()*100+150, 100), 200))
+	node.perMemberLock = NewLockMap()
 	node.addToCluster(nodeId, url)
 	go node.ticker()
 }
@@ -180,13 +186,12 @@ func (node *Node) AddMembers(newMembers *[]int, newMemberUrls *[]string) {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	for i, nodeId := range *newMembers {
-		fmt.Println((*newMemberUrls)[i])
 		node.ClusterMembers[nodeId] = true
 		node.MatchIndex[nodeId] = -1
 		node.NextIndex[nodeId] = len(node.LocalLog)
 		node.rpcClient.NodeUrls[nodeId] = (*newMemberUrls)[i]
+		fmt.Println(fmt.Sprintf("Node %d added to cluster", nodeId))
 	}
-	fmt.Println(fmt.Sprintf("Node %d received membership change", node.NodeId))
 }
 
 func (node *Node) startElection() {
@@ -202,49 +207,54 @@ func (node *Node) startElection() {
 	requestVoteArgs := RequestVoteRequest{CandidateId: node.NodeId, Term: node.CurrentTerm, LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
 	epoch := time.Now().UnixMilli()
 	if voteCount > len(node.ClusterMembers)/2 {
-		fmt.Println(fmt.Sprintf("Node %d elected leader", node.NodeId))
-		node.Role = Leader
-		node.LeaderId = node.NodeId
-		node.initializeNextIndex()
-		node.initializeMatchIndex()
-		node.leaderSendHeartbeat()
-		node.lastUpdateEpoch = epoch
+		node.changeToLeader(epoch)
 		return
 	}
 	for nodeId := range node.ClusterMembers {
 		if nodeId != node.NodeId {
-			go func(id int) {
-				voteResult := node.rpcClient.RequestVote(id, &requestVoteArgs)
-				node.mu.Lock()
-				defer node.mu.Unlock()
-				if voteResult.BadRequest || node.Role == Leader {
-					return
-				}
-				epoch := time.Now().UnixMilli()
-				if node.Role != Candidate {
-					return
-				}
-				if voteResult.VoteGranted {
-					voteCount++
-					if voteCount > len(node.ClusterMembers)/2 {
-						fmt.Println(fmt.Sprintf("Node %d elected leader", node.NodeId))
-						node.Role = Leader
-						node.LeaderId = node.NodeId
-						node.VotedFor = -1
-						node.initializeNextIndex()
-						node.initializeMatchIndex()
-						node.leaderSendHeartbeat()
-						node.lastUpdateEpoch = epoch
-					}
-				} else if voteResult.Term > node.CurrentTerm {
-					node.CurrentTerm = voteResult.Term
-					node.Role = Follower
-					node.VotedFor = -1
-					node.lastUpdateEpoch = epoch
-				}
-			}(nodeId)
+			go node.handleVoteResult(nodeId, &requestVoteArgs, &voteCount)
 		}
 	}
+}
+
+func (node *Node) handleVoteResult(nodeId int, requestVoteArgs *RequestVoteRequest, voteCount *int) {
+	voteResult := node.rpcClient.RequestVote(nodeId, requestVoteArgs)
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if voteResult.BadRequest || node.Role == Leader {
+		return
+	}
+	epoch := time.Now().UnixMilli()
+	if node.Role != Candidate {
+		return
+	}
+	if voteResult.VoteGranted {
+		*voteCount++
+		if *voteCount > len(node.ClusterMembers)/2 {
+			node.changeToLeader(epoch)
+			return
+		}
+	} else if voteResult.Term > node.CurrentTerm {
+		node.changeToFollower(voteResult.Term)
+	}
+}
+
+func (node *Node) changeToLeader(epoch int64) {
+	fmt.Println(fmt.Sprintf("Node %d elected leader", node.NodeId))
+	node.Role = Leader
+	node.LeaderId = node.NodeId
+	node.VotedFor = -1
+	node.initializeNextIndex()
+	node.initializeMatchIndex()
+	node.leaderSendHeartbeat()
+	node.lastUpdateEpoch = epoch
+}
+
+func (node *Node) changeToFollower(newTerm int) {
+	node.CurrentTerm = newTerm
+	node.Role = Follower
+	node.VotedFor = -1
+	node.lastUpdateEpoch = time.Now().UnixMilli()
 }
 
 // Single ticker thread to trigger state changes.
@@ -275,18 +285,14 @@ func (node *Node) ticker() {
 
 // Leader only helper methods
 func (node *Node) leaderSendHeartbeat() {
-	lastIndex := len(node.LocalLog) - 1
-	var termReceived int
-	if lastIndex == -1 {
-		termReceived = -1
-	} else {
-		termReceived = node.LocalLog[lastIndex].termReceived
-	}
-	heartbeatArgs := AppendEntriesRequest{node.CurrentTerm, node.NodeId, lastIndex,
-		termReceived, &([]UserCommand{}), node.CommitIndex}
+	successCount := 1
 	for nodeId := range node.ClusterMembers {
 		if nodeId != node.NodeId {
-			go node.rpcClient.AppendEntries(nodeId, &heartbeatArgs)
+			go func(id int) {
+				node.perMemberLock.Lock(id)
+				node.appendEntryForFollower(id, &[]UserCommand{}, &successCount, true)
+				node.perMemberLock.Unlock(id)
+			}(nodeId)
 		}
 	}
 }
@@ -319,8 +325,8 @@ func (node *Node) addToCluster(nodeId int, url string) {
 		// TODO: Implement this.
 		node.ClusterMembers = nodes
 		node.NodeId = nodeId
-		node.CommitIndex = 0
-		node.LastApplied = 0
+		node.CommitIndex = -1
+		node.LastApplied = -1
 		node.CurrentTerm = 0
 		fmt.Println(fmt.Sprintf("RAFT NODE INITIALIZED - nodeId: %d, serving at %s", nodeId, url))
 		fmt.Println("---------------------")
@@ -350,19 +356,10 @@ func waitForCount(asyncChannel chan bool, targetCount int) bool {
 // Client related methods.
 
 // Updates lastApplied and applies command to local state machine.
-func (node *Node) applyLog() {
-	if node.LastApplied < node.CommitIndex {
-		// TODO: Implement this when building service on top of RAFT.
-		fmt.Println(fmt.Sprintf("Log index %d to %d applied at node %d", node.LastApplied+1, node.CommitIndex, node.NodeId))
-	}
-	node.LastApplied = node.CommitIndex
-}
-
 func (node *Node) HandleExternalCommand(command UserCommand) bool {
 	fmt.Println("client request called")
-	node.mu.Lock()
-	defer node.mu.Unlock()
 	if node.Role == Leader {
+		node.mu.Lock()
 		node.LocalLog = append(node.LocalLog, LogEntry{node.CurrentTerm, command})
 		lastLogIndex := len(node.LocalLog) - 1
 		lastLogTerm := 0
@@ -372,26 +369,33 @@ func (node *Node) HandleExternalCommand(command UserCommand) bool {
 			lastLogTerm = -1
 		}
 		successCount := 1
+		if len(node.ClusterMembers) == 1 {
+			node.CommitIndex++
+			return true
+		}
 		for id := range node.ClusterMembers {
 			if id == node.NodeId {
 				continue
 			}
 			go func(nodeId int) {
-				node.appendEntryForFollower(nodeId, &[]UserCommand{command}, &successCount)
+				node.perMemberLock.Lock(nodeId)
+				node.appendEntryForFollower(nodeId, &[]UserCommand{command}, &successCount, false)
+				node.perMemberLock.Unlock(nodeId)
 			}(id)
 		}
+		node.mu.Unlock()
+	} else {
+
 	}
 	return true
 }
 
-func (node *Node) appendEntryForFollower(targetNodeId int, command *[]UserCommand, successCount *int) bool {
+func (node *Node) appendEntryForFollower(targetNodeId int, command *[]UserCommand, successCount *int, isHeartbeat bool) bool {
 	node.mu.Lock()
 	lastLogIndex := node.NextIndex[targetNodeId] - 1
-	lastLogTerm := 0
-	if lastLogIndex >= 0 {
-		lastLogTerm = node.LocalLog[lastLogTerm].termReceived
-	} else {
-		lastLogTerm = -1
+	lastLogTerm := -1
+	if lastLogIndex >= 0 && lastLogIndex < len(node.LocalLog) {
+		lastLogTerm = node.LocalLog[lastLogIndex].termReceived
 	}
 	if len(node.LocalLog)-1 < lastLogIndex {
 		node.mu.Unlock()
@@ -406,24 +410,18 @@ func (node *Node) appendEntryForFollower(targetNodeId int, command *[]UserComman
 		node.mu.Unlock()
 		return false
 	}
-	if *successCount > len(node.ClusterMembers)/2 {
-		return true
-	}
 	if response.Success {
 		*successCount++
-		node.NextIndex[targetNodeId] = len(node.LocalLog)
-		node.MatchIndex[targetNodeId] = len(node.LocalLog) - 1
+		node.NextIndex[targetNodeId] = lastLogIndex + len(*command) + 1
+		node.MatchIndex[targetNodeId] = lastLogIndex + len(*command)
 		if *successCount > len(node.ClusterMembers)/2 {
-			node.CommitIndex = len(node.LocalLog) - 1
-			fmt.Printf("user command %d committed\n", node.CommitIndex)
+			node.CommitIndex = node.MatchIndex[targetNodeId]
 		}
 		node.mu.Unlock()
 		return true
 	} else {
 		if response.Term > node.CurrentTerm {
-			node.CurrentTerm = response.Term
-			node.Role = Follower
-			node.lastUpdateEpoch = time.Now().UnixMilli()
+			node.changeToFollower(response.Term)
 			node.mu.Unlock()
 			return false
 		}
@@ -431,6 +429,6 @@ func (node *Node) appendEntryForFollower(targetNodeId int, command *[]UserComman
 		lastLogEntry := node.LocalLog[node.NextIndex[targetNodeId]]
 		*command = append([]UserCommand{lastLogEntry.content}, *command...)
 		node.mu.Unlock()
-		return node.appendEntryForFollower(targetNodeId, command, successCount)
+		return node.appendEntryForFollower(targetNodeId, command, successCount, isHeartbeat)
 	}
 }

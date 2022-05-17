@@ -73,3 +73,11 @@ func (client *HttpClient) RegisterNewNode(nodeId int, nodeUrl string) map[int]bo
 	client.NodeUrls[nodeId] = nodeUrl
 	return keys
 }
+
+func (client *HttpClient) ForwardClientCall(command UserCommand, leaderId int) bool {
+	_, err := http.Get(fmt.Sprintf("%s/add?command=%d", client.NodeUrls[leaderId], command))
+	if err != nil {
+		return false
+	}
+	return true
+}

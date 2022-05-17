@@ -1,5 +1,14 @@
-Process started at 1652659661734
+Process started at 1652776090390
 RAFT NODE INITIALIZED - nodeId: 2, serving at http://localhost:4002
 ---------------------
-http://localhost:4003
-Node 2 received membership change
+Node 3 added to cluster
+Log index 0 to 0 applied at node 2, values are [{1 testCommand1}]
+Log index 1 to 1 applied at node 2, values are [{1 testCommand2}]
+Log index 2 to 2 applied at node 2, values are [{1 testCommand3}]
+Log index 3 to 3 applied at node 2, values are [{1 testCommand4}]
+Log index 4 to 4 applied at node 2, values are [{1 testCommand5}]
+Node 4 added to cluster
+Node 5 added to cluster
+Log index 5 to 5 applied at node 2, values are [{1 newCommand1}]
+Log index 6 to 6 applied at node 2, values are [{1 newCommand2}]
+Log index 7 to 7 applied at node 2, values are [{1 newCommand3}]
