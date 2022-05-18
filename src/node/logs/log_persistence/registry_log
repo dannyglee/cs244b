@@ -1,4 +1,6 @@
-Process started at 1652845312780
+Process started at 1652846999481
 Node 1 started serving at http://localhost:4001
 Node 2 started serving at http://localhost:4002
 Node 3 started serving at http://localhost:4003
+Node 1 started serving at http://localhost:4001
+Node 4 started serving at http://localhost:4004

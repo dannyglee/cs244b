@@ -49,6 +49,10 @@ func (client *HttpClient) AppendEntries(targetNodeId int, args *AppendEntriesReq
 }
 
 func (client *HttpClient) AddNewMember(targetNodeId int, ackChannel chan bool) {
+	if targetNodeId == client.NodeId {
+		ackChannel <- true
+		return
+	}
 	_, err := http.Get(fmt.Sprintf("%s/addMembers?nodeId=%d&url=%s",
 		client.NodeUrls[targetNodeId], client.NodeId, client.NodeUrls[client.NodeId]))
 	if err != nil {

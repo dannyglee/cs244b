@@ -1,0 +1,6 @@
+Process started at 1652847000894
+RAFT NODE INITIALIZED - nodeId: 1, serving at http://localhost:4001
+---------------------
+changed to candidate
+Log index 0 to 2 applied at node 1, values are [{2 testCommand1} {2 testCommand2} {2 testCommand3}]
+Node 4 added to cluster

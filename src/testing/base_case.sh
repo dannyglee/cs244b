@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# This file includes a comprehensive correctness test.
+
 # create necessary log files
 mkdir -p ../node/logs/base_case && cd "$_"
 touch node1

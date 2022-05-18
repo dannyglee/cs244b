@@ -1,0 +1,4 @@
+Process started at 1652847001164
+RAFT NODE INITIALIZED - nodeId: 4, serving at http://localhost:4004
+---------------------
+Log index 0 to 2 applied at node 4, values are [{2 testCommand1} {2 testCommand2} {2 testCommand3}]
