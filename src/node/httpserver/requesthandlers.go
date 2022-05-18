@@ -56,8 +56,8 @@ func (server *RaftServer) RequestVote(w http.ResponseWriter, r *http.Request) {
 
 func (server *RaftServer) ClientRequest(w http.ResponseWriter, r *http.Request) {
 	command := r.FormValue("command")
-	success := server.Node.HandleExternalCommand(core.UserCommand(command))
-	w.Write([]byte(fmt.Sprintf("%t", success)))
+	leaderId := server.Node.HandleExternalCommand(core.UserCommand(command))
+	w.Write([]byte(fmt.Sprintf("%d", leaderId)))
 }
 
 func (server *RaftServer) AddMembers(w http.ResponseWriter, r *http.Request) {

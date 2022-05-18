@@ -1,10 +1,9 @@
-Process started at 1652776092129
+Process started at 1652844128014
 RAFT NODE INITIALIZED - nodeId: 4, serving at http://localhost:4004
 ---------------------
-Log index 0 to 4 applied at node 4, values are [{1 testCommand1} {1 testCommand2} {1 testCommand3} {1 testCommand4} {1 testCommand5}]
-Node 5 added to cluster
-Log index 5 to 5 applied at node 4, values are [{1 newCommand1}]
-Log index 6 to 6 applied at node 4, values are [{1 newCommand2}]
-Log index 7 to 7 applied at node 4, values are [{1 newCommand3}]
 changed to candidate
-Node 4 elected leader
+Node 5 added to cluster
+Log index 0 to 3 applied at node 4, values are [{1 testCommand1} {1 testCommand2} {1 testCommand3} {1 newCommand1}]
+Log index 4 to 5 applied at node 4, values are [{1 newCommand2} {1 newCommand3}]
+Log index 6 to 6 applied at node 4, values are [{1 afterkill1}]
+Log index 7 to 8 applied at node 4, values are [{1 afterkill2} {1 afterkill3}]

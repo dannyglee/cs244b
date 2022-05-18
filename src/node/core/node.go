@@ -173,12 +173,12 @@ func (node *Node) Init(nodeId int, url string) {
 	node.rpcClient = &HttpClient{RegistryUrl: "http://localhost:5000/", NodeId: nodeId}
 	node.NextIndex = make(map[int]int)
 	node.MatchIndex = make(map[int]int)
-	node.changeToFollower(0)
 	node.LocalLog = []LogEntry{}
 	node.heartbeatIntervalMillis = 50
-	node.electionTimeoutMillis = int64(math.Min(math.Max(rand.NormFloat64()*100+150, 100), 200))
+	node.electionTimeoutMillis = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200))
 	node.perMemberLock = NewLockMap()
 	node.addToCluster(nodeId, url)
+	node.changeToFollower(0)
 	go node.ticker()
 }
 
@@ -312,6 +312,8 @@ func (node *Node) initializeMatchIndex() {
 
 // Temporary group membership change protocol: wait until all nodes see new member before initialization.
 func (node *Node) addToCluster(nodeId int, url string) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
 	nodes := node.rpcClient.RegisterNewNode(nodeId, url)
 	confirmationChannel := make(chan bool)
 	confirmationCountTarget := len(nodes)
@@ -356,7 +358,7 @@ func waitForCount(asyncChannel chan bool, targetCount int) bool {
 // Client related methods.
 
 // Updates lastApplied and applies command to local state machine.
-func (node *Node) HandleExternalCommand(command UserCommand) bool {
+func (node *Node) HandleExternalCommand(command UserCommand) int {
 	fmt.Println("client request called")
 	if node.Role == Leader {
 		node.mu.Lock()
@@ -369,9 +371,10 @@ func (node *Node) HandleExternalCommand(command UserCommand) bool {
 			lastLogTerm = -1
 		}
 		successCount := 1
+		node.lastUpdateEpoch = time.Now().UnixMilli()
 		if len(node.ClusterMembers) == 1 {
 			node.CommitIndex++
-			return true
+			return node.NodeId
 		}
 		for id := range node.ClusterMembers {
 			if id == node.NodeId {
@@ -384,10 +387,9 @@ func (node *Node) HandleExternalCommand(command UserCommand) bool {
 			}(id)
 		}
 		node.mu.Unlock()
-	} else {
-
+		return node.NodeId
 	}
-	return true
+	return node.LeaderId
 }
 
 func (node *Node) appendEntryForFollower(targetNodeId int, command *[]UserCommand, successCount *int, isHeartbeat bool) bool {

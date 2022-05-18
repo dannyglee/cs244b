@@ -1,4 +1,4 @@
-Process started at 1652776087381
+Process started at 1652844127511
 RAFT NODE INITIALIZED - nodeId: 1, serving at http://localhost:4001
 ---------------------
 changed to candidate
@@ -8,10 +8,13 @@ Node 3 added to cluster
 client request called
 client request called
 client request called
-client request called
-client request called
 Node 4 added to cluster
 Node 5 added to cluster
+client request called
+client request called
+client request called
+client request called
+client request called
 client request called
 client request called
 client request called

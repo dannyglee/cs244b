@@ -17,7 +17,11 @@ func main() {
 	// NodeId to port mapping.
 	activeNodes := map[string]string{}
 
+	var lock sync.Mutex
+
 	http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
+		lock.Lock()
+		defer lock.Unlock()
 		nodeId := r.FormValue("nodeId")
 		url := r.FormValue("url")
 		bytes, _ := json.Marshal(activeNodes)
