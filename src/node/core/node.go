@@ -50,12 +50,14 @@ type Node struct {
 
 	// Always persisted on disk. (can be improved)
 	CurrentTerm int
-	VotedFor    int
+	VotedFor	int
 	LocalLog    []LogEntry
 
 	// Leader specific states.
 	NextIndex  map[int]int
 	MatchIndex map[int]int
+
+	votedFor    map[int]int
 }
 
 // Request/response data structures.
@@ -139,6 +141,7 @@ func (node *Node) applyLog() {
 	node.LastApplied = node.CommitIndex
 }
 
+// TODO: Migrate RequestVote from MIT lab. CALLEE
 func (node *Node) RequestVote(args *RequestVoteRequest) RequestVoteResponse {
 	node.mu.Lock()
 	defer node.mu.Unlock()
@@ -194,6 +197,21 @@ func (node *Node) AddMembers(newMembers *[]int, newMemberUrls *[]string) {
 	}
 }
 
+// Not thread-safe
+func (node *Node) getLastLogIndexAndTerm() (int, int) {
+	var lastLogIdx int;
+	var lastLogTerm int;
+	if len(node.LocalLog) == 0 {
+		lastLogIdx = -1
+		lastLogTerm = -1
+	} else {
+		lastLogIdx = len(node.LocalLog) - 1
+		lastLogTerm = node.LocalLog[lastLogIdx].termReceived
+	}
+	return lastLogIdx, lastLogTerm
+}
+
+/*
 func (node *Node) startElection() {
 	voteCount := 1
 	node.CurrentTerm++
@@ -214,6 +232,63 @@ func (node *Node) startElection() {
 		if nodeId != node.NodeId {
 			go node.handleVoteResult(nodeId, &requestVoteArgs, &voteCount)
 		}
+	}
+}
+*/
+
+
+// TODO: Migrate RequestVote from MIT lab. CALLER
+func (node *Node) startElection() {
+	node.mu.Lock()
+	node.CurrentTerm++
+	node.LeaderId = -1
+	node.votedFor[node.CurrentTerm] = node.NodeId
+	startTime := time.Now()
+
+	term := node.CurrentTerm
+	me := node.NodeId
+	lastLogIdx, lastLogTerm := node.getLastLogIndexAndTerm()
+	
+	var roundLock sync.Mutex
+	voteCount := 1
+	yesVoteCount := 1  // Always vote for myself.
+	for i := 0; i < len(node.ClusterMembers); i++ {
+		if i == node.NodeId {
+			continue
+		}
+		go func (dest int) {
+			for {			
+				voteResponse := node.rpcClient.sendRequestVote(dest, RequestVoteRequest{term, me, lastLogIdx, lastLogTerm});
+				if !voteResponse.BadRequest {
+					break
+				}
+				time.Sleep(kRpcInterval)
+			}
+			if voteResponse.Term > node.CurrentTerm {
+				node.changeToFollower(voteResponse.Term)
+			}
+			roundLock.Lock()
+			voteCount++
+			if vote.VoteGranted {
+				yesVoteCount++
+			}
+			roundLock.Unlock()
+		} (i)
+	}
+	// Waiting for the election result
+	for {
+		roundLock.Lock()
+		if yesVoteCount >= len(node.peers) / 2 + 1  || voteCount == len(node.peers) || time.Now().Sub(startTime) > kElectionRoundTimeout {
+			roundLock.Unlock()
+			break
+		}
+		roundLock.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	electionSucceeds := yesVoteCount >= len(node.peers) / 2 + 1
+	node.mu.Unlock()
+	if electionSucceeds {
+		node.becomeNewLeader()
 	}
 }
 
@@ -254,6 +329,7 @@ func (node *Node) changeToFollower(newTerm int) {
 	node.CurrentTerm = newTerm
 	node.Role = Follower
 	node.VotedFor = -1
+	node.votedFor[newTerm] = -1
 	node.lastUpdateEpoch = time.Now().UnixMilli()
 }
 
