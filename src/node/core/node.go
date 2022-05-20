@@ -93,20 +93,19 @@ type RequestVoteResponse struct {
 func (node *Node) AppendEntries(args *AppendEntriesRequest) AppendEntriesResponse {
 	node.mu.Lock()
 	defer node.mu.Unlock()
-	// Early success case.
-	if args.PrevLogIndex == -1 {
-		node.LeaderId = args.LeaderId
-		node.changeToFollower(args.Term)
-		resp := node.appendEntriesSuccess(args)
-		return resp
-	}
 
 	// Failure cases.
 	if args.Term < node.CurrentTerm {
 		return AppendEntriesResponse{false, node.CurrentTerm, false}
 	}
+
 	node.LeaderId = args.LeaderId
 	node.changeToFollower(args.Term)
+	// Early success case.
+	if args.PrevLogIndex == -1 {
+		resp := node.appendEntriesSuccess(args)
+		return resp
+	}
 	if len(node.LocalLog) <= args.PrevLogIndex || node.LocalLog[args.PrevLogIndex].termReceived != args.PrevLogTerm {
 		return AppendEntriesResponse{false, node.CurrentTerm, false}
 	}
@@ -195,31 +194,25 @@ func (node *Node) CommitGroupChange(timeStamp int64) {
 	}
 }
 
-type AddOrRemoveMemberArgs struct {
-	nodeId         int
-	url            string
-	updatedMembers map[int]string
-	isAddMember    bool
-}
-
-func (node *Node) AddOrRemoveMember(updatedMembers *map[int]string, removeId int) bool {
+func (node *Node) AddMember(newwNodeId int, url string, groupMembers *map[int]string) bool {
 	node.mu.Lock()
 	defer node.mu.Unlock()
-	if len(*updatedMembers) != 0 {
-		node.ClusterMembers = *updatedMembers
+	if len(*groupMembers) > 0 {
+		node.ClusterMembers = *groupMembers
+		if node.Role == Leader {
+			node.initializeNextIndex()
+			node.initializeMatchIndex()
+		}
 		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
-		return true
 	} else {
-		if removeId == node.NodeId {
-			node.ClusterMembers = make(map[int]string)
-			return true
+		node.ClusterMembers[newwNodeId] = url
+		if node.Role == Leader {
+			node.NextIndex[newwNodeId] = len(node.LocalLog)
+			node.MatchIndex[newwNodeId] = -1
 		}
-		if _, ok := node.ClusterMembers[removeId]; ok {
-			delete(node.ClusterMembers, removeId)
-			node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
-		}
-		return true
+		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
 	}
+	return true
 }
 
 func (node *Node) RemoveMember(nodeId int) bool {
@@ -232,6 +225,10 @@ func (node *Node) RemoveMember(nodeId int) bool {
 	if _, ok := node.ClusterMembers[nodeId]; ok {
 		delete(node.ClusterMembers, nodeId)
 		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
+		if node.Role == Leader {
+			delete(node.MatchIndex, nodeId)
+			delete(node.NextIndex, nodeId)
+		}
 	}
 	return true
 }
@@ -355,11 +352,12 @@ func (node *Node) ticker() {
 
 // Leader only helper methods
 func (node *Node) leaderSendHeartbeat() {
-	successCount := 1
+	emptyCommand := []LogEntry{}
+	placeholder := 0
 	for nodeId := range node.ClusterMembers {
 		if nodeId != node.NodeId {
 			go func(id int) {
-				node.appendEntryForFollower(id, &[]UserCommand{}, &successCount, true)
+				node.appendEntryForFollower(id, 1, &emptyCommand, &placeholder)
 			}(nodeId)
 		}
 	}
@@ -417,13 +415,14 @@ func (node *Node) HandleExternalCommand(command UserCommand) int {
 			node.CommitIndex++
 			return node.NodeId
 		}
+		term := node.CurrentTerm
 		for id := range node.ClusterMembers {
 			if id == node.NodeId {
 				continue
 			}
 			go func(nodeId int) {
 				node.perMemberLock.Lock(nodeId)
-				node.appendEntryForFollower(nodeId, &[]UserCommand{command}, &successCount, false)
+				node.appendEntryForFollower(nodeId, 2, &[]LogEntry{{term, command}}, &successCount)
 				node.perMemberLock.Unlock(nodeId)
 			}(id)
 		}
@@ -432,7 +431,7 @@ func (node *Node) HandleExternalCommand(command UserCommand) int {
 	return node.LeaderId
 }
 
-func (node *Node) appendEntryForFollower(targetNodeId int, command *[]UserCommand, successCount *int, isHeartbeat bool) bool {
+func (node *Node) appendEntryForFollower(targetNodeId, nextIndexDecIfFail int, command *[]LogEntry, successCount *int) bool {
 	node.mu.Lock()
 	lastLogIndex := node.NextIndex[targetNodeId] - 1
 	lastLogTerm := -1
@@ -444,12 +443,9 @@ func (node *Node) appendEntryForFollower(targetNodeId int, command *[]UserComman
 		return false
 	}
 	args := AppendEntriesRequest{node.CurrentTerm, node.NodeId, lastLogIndex,
-		lastLogTerm, command, node.CommitIndex}
+		lastLogTerm, getCommandFromEntries(command), node.CommitIndex}
 	node.mu.Unlock()
 	response := node.rpcClient.AppendEntries(node.ClusterMembers[targetNodeId], &args)
-	if isHeartbeat {
-		return true
-	}
 	node.mu.Lock()
 	if response.BadRequest || node.Role != Leader {
 		node.mu.Unlock()
@@ -470,10 +466,19 @@ func (node *Node) appendEntryForFollower(targetNodeId int, command *[]UserComman
 			node.mu.Unlock()
 			return false
 		}
-		node.NextIndex[targetNodeId]--
-		lastLogEntry := node.LocalLog[node.NextIndex[targetNodeId]]
-		*command = append([]UserCommand{lastLogEntry.content}, *command...)
+		prevNextIndex := node.NextIndex[targetNodeId]
+		node.NextIndex[targetNodeId] = int(math.Max(float64(node.NextIndex[targetNodeId]-nextIndexDecIfFail), float64(0)))
+		unseenLogEntries := node.LocalLog[node.NextIndex[targetNodeId]:prevNextIndex]
+		*command = append(unseenLogEntries, *command...)
 		node.mu.Unlock()
-		return node.appendEntryForFollower(targetNodeId, command, successCount, isHeartbeat)
+		return node.appendEntryForFollower(targetNodeId, nextIndexDecIfFail*2, command, successCount)
 	}
+}
+
+func getCommandFromEntries(entries *[]LogEntry) *([]UserCommand) {
+	output := make([]UserCommand, len(*entries))
+	for i, v := range *entries {
+		output[i] = v.content
+	}
+	return &output
 }

@@ -54,7 +54,8 @@ func main() {
 	http.HandleFunc("/prepareCommit", server.PrepareCommitGroupChange)
 	http.HandleFunc("/commit", server.CommitGroupChange)
 	http.HandleFunc("/ping", server.RegistryPing)
-	http.HandleFunc("/addOrRemoveMember", server.AddOrRemoveMember)
+	http.HandleFunc("/addMember", server.AddMember)
+	http.HandleFunc("/removeMember", server.RemoveMember)
 	go func() {
 		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", port), nil))
 		wg.Done()

@@ -96,16 +96,22 @@ func (registry *Registry) addOrRemoveSingleMember(isAdd bool, nodeId int, url st
 		clusterCopy = copyCluster(&(registry.currentMembers))
 		expectedSuccess++
 	} else {
-		if url, ok := registry.currentMembers[nodeId]; ok {
+		if removeUrl, ok := registry.currentMembers[nodeId]; ok {
 			delete(registry.currentMembers, nodeId)
-			go sendAddOrRemoveMember(url, &emptyMap, nodeId, &asyncResultChannel)
+			go sendRemoveMember(removeUrl, nodeId, &asyncResultChannel)
 		}
 	}
-	for _, targetUrl := range registry.currentMembers {
+	for id, targetUrl := range registry.currentMembers {
 		if isAdd == true {
-			go sendAddOrRemoveMember(targetUrl, &clusterCopy, nodeId, &asyncResultChannel)
+			var clusterMembers map[int]string
+			if id == nodeId {
+				clusterMembers = clusterCopy
+			} else {
+				clusterMembers = emptyMap
+			}
+			go sendAddMember(targetUrl, nodeId, url, &clusterMembers, &asyncResultChannel)
 		} else {
-			go sendAddOrRemoveMember(targetUrl, &emptyMap, nodeId, &asyncResultChannel)
+			go sendRemoveMember(targetUrl, nodeId, &asyncResultChannel)
 		}
 	}
 	for {
@@ -148,10 +154,18 @@ func sendCommit(targetUrl string, timeStamp int64) {
 	http.Get(fmt.Sprintf("%s/commit?timestamp=%d", targetUrl, timeStamp))
 }
 
-func sendAddOrRemoveMember(targetUrl string, newCluster *map[int]string, removeId int, resultChannel *chan bool) {
-	postBody, _ := json.Marshal(*newCluster)
+func sendRemoveMember(targetUrl string, removeId int, resultChannel *chan bool) {
+	_, err := http.Get(fmt.Sprintf("%s/removeMember?nodeId=%d", targetUrl, removeId))
+	if err != nil {
+		*resultChannel <- false
+	}
+	*resultChannel <- true
+}
+
+func sendAddMember(targetUrl string, nodeId int, url string, clusterMembers *map[int]string, resultChannel *chan bool) {
+	postBody, _ := json.Marshal(*clusterMembers)
 	postBuffer := bytes.NewBuffer(postBody)
-	_, err := http.Post(fmt.Sprintf("%s/addOrRemoveMember?removeId=%d", targetUrl, removeId), "application/json", postBuffer)
+	_, err := http.Post(fmt.Sprintf("%s/addMember?nodeId=%d&url=%s", targetUrl, nodeId, url), "application/json", postBuffer)
 	if err != nil {
 		*resultChannel <- false
 	}

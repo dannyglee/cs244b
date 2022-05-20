@@ -80,16 +80,25 @@ func (server *RaftServer) CommitGroupChange(w http.ResponseWriter, r *http.Reque
 	server.Node.CommitGroupChange(timeStamp)
 }
 
-func (server *RaftServer) AddOrRemoveMember(w http.ResponseWriter, r *http.Request) {
+func (server *RaftServer) AddMember(w http.ResponseWriter, r *http.Request) {
 	if server.useSimulatedLatency {
 		blockRequest()
 	}
+	nodeId, _ := strconv.ParseInt(r.URL.Query().Get("nodeId"), 10, 64)
+	url := r.URL.Query().Get("url")
+	groupMembers := make(map[int]string)
 	defer r.Body.Close()
-	removeId, _ := strconv.ParseInt(r.URL.Query().Get("removeId"), 10, 64)
 	body, _ := io.ReadAll(r.Body)
-	input := make(map[int]string)
-	json.Unmarshal(body, &input)
-	server.Node.AddOrRemoveMember(&input, int(removeId))
+	json.Unmarshal(body, &groupMembers)
+	server.Node.AddMember(int(nodeId), url, &groupMembers)
+}
+
+func (server *RaftServer) RemoveMember(w http.ResponseWriter, r *http.Request) {
+	if server.useSimulatedLatency {
+		blockRequest()
+	}
+	nodeId, _ := strconv.ParseInt(r.URL.Query().Get("nodeId"), 10, 64)
+	server.Node.RemoveMember(int(nodeId))
 }
 
 func (server *RaftServer) RegistryPing(w http.ResponseWriter, r *http.Request) {
