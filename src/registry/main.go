@@ -7,22 +7,64 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
 )
 
 type Registry struct {
-	mu                   sync.Mutex
-	currentMembers       map[int]string
-	pendingMembers       map[int]string
-	groupChangeTimestamp int64
+	mu                          sync.Mutex
+	currentMembers              map[int]string
+	pendingMembers              map[int]string
+	groupChangeTimestamp        int64
+	healthPingEpoch             int64
+	consequtiveFailedHealthPing map[int]int
+	healthPingIntervalMicros    int64
+	maxAllowablePingFailures    int
 }
 
-func (registry *Registry) init() {
+func (registry *Registry) init(healthPingIntervalSeconds, maxAllowablePingFailures int) {
 	registry.currentMembers = make(map[int]string)
 	registry.pendingMembers = make(map[int]string)
-	registry.groupChangeTimestamp = time.Now().UnixNano()
+	registry.consequtiveFailedHealthPing = make(map[int]int)
+	registry.groupChangeTimestamp = time.Now().UnixMicro()
+	registry.healthPingIntervalMicros = int64(healthPingIntervalSeconds) * 1000 * 1000
+	registry.healthPingEpoch = time.Now().UnixMicro()
+	registry.maxAllowablePingFailures = maxAllowablePingFailures
+}
+
+// -------------------------------------------------------------------------------------------------
+// Ticker function for permenant failure detection
+// -------------------------------------------------------------------------------------------------
+func (registry *Registry) monitorGroupHealth() {
+	for {
+		epoch := time.Now().UnixMicro()
+		if epoch > registry.healthPingEpoch+registry.healthPingIntervalMicros {
+			registry.mu.Lock()
+			for nodeId, url := range registry.currentMembers {
+				if _, ok := registry.consequtiveFailedHealthPing[nodeId]; !ok {
+					registry.consequtiveFailedHealthPing[nodeId] = 0
+				}
+				go func(nodeId int, url string) {
+					pingResult := ping(url)
+					registry.mu.Lock()
+					if pingResult {
+						registry.consequtiveFailedHealthPing[nodeId] = 0
+					} else {
+						registry.consequtiveFailedHealthPing[nodeId]++
+						if registry.consequtiveFailedHealthPing[nodeId] >
+							registry.maxAllowablePingFailures {
+							go registry.addOrRemoveSingleMember(false, true, nodeId, url)
+						}
+					}
+					registry.mu.Unlock()
+				}(nodeId, url)
+			}
+			registry.healthPingEpoch = epoch
+			registry.mu.Unlock()
+		}
+	}
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -32,10 +74,16 @@ func (registry *Registry) memberChange(newMembers *map[int]string) bool {
 	registry.mu.Lock()
 	registry.pendingMembers = make(map[int]string)
 	toAdd := make(map[int]string)
+	toRemove := make(map[int]string)
 	for nodeId, url := range *newMembers {
 		registry.pendingMembers[nodeId] = url
 		if _, ok := registry.currentMembers[nodeId]; !ok {
 			toAdd[nodeId] = url
+		}
+	}
+	for nodeId, url := range registry.currentMembers {
+		if _, ok := (*newMembers)[nodeId]; !ok {
+			toRemove[nodeId] = url
 		}
 	}
 	changeTimestamp := time.Now().UnixMicro()
@@ -67,8 +115,12 @@ func (registry *Registry) memberChange(newMembers *map[int]string) bool {
 				defer registry.mu.Unlock()
 				if changeTimestamp == registry.groupChangeTimestamp && voteResult {
 					registry.currentMembers = make(map[int]string)
+					registry.consequtiveFailedHealthPing = make(map[int]int)
 					for nodeId, url := range registry.pendingMembers {
 						registry.currentMembers[nodeId] = url
+						go sendCommit(url, changeTimestamp)
+					}
+					for _, url := range toRemove {
 						go sendCommit(url, changeTimestamp)
 					}
 					return true
@@ -82,7 +134,7 @@ func (registry *Registry) memberChange(newMembers *map[int]string) bool {
 // -------------------------------------------------------------------------------------------------
 // Business logic for singel member change.
 // -------------------------------------------------------------------------------------------------
-func (registry *Registry) addOrRemoveSingleMember(isAdd bool, nodeId int, url string) bool {
+func (registry *Registry) addOrRemoveSingleMember(isAdd, isFailureDetection bool, nodeId int, url string) bool {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	expectedSuccess := len(registry.currentMembers)
@@ -98,7 +150,12 @@ func (registry *Registry) addOrRemoveSingleMember(isAdd bool, nodeId int, url st
 	} else {
 		if removeUrl, ok := registry.currentMembers[nodeId]; ok {
 			delete(registry.currentMembers, nodeId)
-			go sendRemoveMember(removeUrl, nodeId, &asyncResultChannel)
+			if !isFailureDetection {
+				go sendRemoveMember(removeUrl, nodeId, &asyncResultChannel)
+			}
+		}
+		if _, ok := registry.consequtiveFailedHealthPing[nodeId]; ok {
+			delete(registry.consequtiveFailedHealthPing, nodeId)
 		}
 	}
 	for id, targetUrl := range registry.currentMembers {
@@ -172,6 +229,11 @@ func sendAddMember(targetUrl string, nodeId int, url string, clusterMembers *map
 	*resultChannel <- true
 }
 
+func ping(targetUrl string) bool {
+	_, err := http.Get(fmt.Sprintf("%s/ping", targetUrl))
+	return err == nil
+}
+
 // -------------------------------------------------------------------------------------------------
 // Request handlers for registry public APIs
 // -------------------------------------------------------------------------------------------------
@@ -187,13 +249,13 @@ func (registry *Registry) HandleMembershipChange(w http.ResponseWriter, r *http.
 func (registry *Registry) HandleAddSingleMember(w http.ResponseWriter, r *http.Request) {
 	nodeId, _ := strconv.ParseInt(r.URL.Query().Get("nodeId"), 10, 0)
 	url := r.URL.Query().Get("url")
-	result := registry.addOrRemoveSingleMember(true, int(nodeId), url)
+	result := registry.addOrRemoveSingleMember(true, false, int(nodeId), url)
 	w.Write([]byte(fmt.Sprintf("%t", result)))
 }
 
 func (registry *Registry) HandleRemoveSingleMember(w http.ResponseWriter, r *http.Request) {
 	nodeId, _ := strconv.ParseInt(r.URL.Query().Get("nodeId"), 10, 0)
-	result := registry.addOrRemoveSingleMember(false, int(nodeId), "")
+	result := registry.addOrRemoveSingleMember(false, false, int(nodeId), "")
 	w.Write([]byte(fmt.Sprintf("%t", result)))
 }
 
@@ -209,14 +271,15 @@ func copyCluster(src *map[int]string) map[int]string {
 }
 
 func main() {
-
+	healthPingIntervalSeconds, _ := strconv.Atoi(os.Args[1])
+	maxAllowablePingFailures, _ := strconv.Atoi(os.Args[2])
 	fmt.Printf("Process started at %d\n", time.Now().UnixMilli())
 	wg := new(sync.WaitGroup)
 	wg.Add(1)
 
 	// Initialize registry.
 	registry := Registry{}
-	registry.init()
+	registry.init(healthPingIntervalSeconds, maxAllowablePingFailures)
 
 	http.HandleFunc("/addSingleMember", registry.HandleAddSingleMember)
 	http.HandleFunc("/removeSingleMember", registry.HandleRemoveSingleMember)
@@ -226,6 +289,8 @@ func main() {
 		log.Fatal(http.ListenAndServe(":5000", nil))
 		wg.Done()
 	}()
+
+	go registry.monitorGroupHealth()
 
 	wg.Wait()
 }
