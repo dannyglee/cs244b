@@ -19,11 +19,11 @@ type RaftServer struct {
 	useSimulatedLatency bool
 }
 
-func (server *RaftServer) Init(nodeId int, url string, useSimulatedLatency bool) {
+func (server *RaftServer) Init(nodeId int, url string, useSimulatedLatency, startAsLeader bool) {
 	server.nodeId = nodeId
 	server.url = url
 	node := core.Node{}
-	node.Init(nodeId, url)
+	node.Init(nodeId, url, startAsLeader)
 	server.Node = &node
 	server.useSimulatedLatency = useSimulatedLatency
 }
@@ -55,21 +55,45 @@ func (server *RaftServer) RequestVote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (server *RaftServer) ClientRequest(w http.ResponseWriter, r *http.Request) {
-	command := r.FormValue("command")
+	command := r.URL.Query().Get("command")
 	leaderId := server.Node.HandleExternalCommand(core.UserCommand(command))
 	w.Write([]byte(fmt.Sprintf("%d", leaderId)))
 }
 
-func (server *RaftServer) AddMembers(w http.ResponseWriter, r *http.Request) {
+func (server *RaftServer) PrepareCommitGroupChange(w http.ResponseWriter, r *http.Request) {
 	if server.useSimulatedLatency {
 		blockRequest()
 	}
-	nodeId, _ := strconv.Atoi(r.FormValue("nodeId"))
-	url := r.FormValue("url")
-	newMembers := []int{nodeId}
-	newMembeUrls := []string{url}
-	server.Node.AddMembers(&newMembers, &newMembeUrls)
-	w.Write([]byte("DONE"))
+	defer r.Body.Close()
+	body, _ := io.ReadAll(r.Body)
+	input := core.PrepareCommitArgs{}
+	json.Unmarshal(body, &input)
+	result := server.Node.PrepareCommitGroupChange(&input)
+	w.Write([]byte(fmt.Sprintf("%t", result)))
+}
+
+func (server *RaftServer) CommitGroupChange(w http.ResponseWriter, r *http.Request) {
+	if server.useSimulatedLatency {
+		blockRequest()
+	}
+	timeStamp, _ := strconv.ParseInt(r.URL.Query().Get("timestamp"), 10, 64)
+	server.Node.CommitGroupChange(timeStamp)
+}
+
+func (server *RaftServer) AddOrRemoveMember(w http.ResponseWriter, r *http.Request) {
+	if server.useSimulatedLatency {
+		blockRequest()
+	}
+	defer r.Body.Close()
+	removeId, _ := strconv.ParseInt(r.URL.Query().Get("removeId"), 10, 64)
+	body, _ := io.ReadAll(r.Body)
+	input := make(map[int]string)
+	json.Unmarshal(body, &input)
+	server.Node.AddOrRemoveMember(&input, int(removeId))
+}
+
+func (server *RaftServer) RegistryPing(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("ok"))
 }
 
 func blockRequest() {

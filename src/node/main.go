@@ -41,16 +41,20 @@ func main() {
 	url := os.Args[1]
 	port := os.Args[2]
 	nodeId, _ := strconv.Atoi(os.Args[3])
+	startAsLeader, _ := strconv.ParseBool(os.Args[4])
 	wg := new(sync.WaitGroup)
 	wg.Add(2)
 	rand.Seed(time.Now().UnixNano())
 	server := httpserver.RaftServer{}
-	server.Init(int(nodeId), url, true)
+	server.Init(int(nodeId), url, true, startAsLeader)
 
 	http.HandleFunc("/appendEntries", server.AppendEntries)
 	http.HandleFunc("/requestVote", server.RequestVote)
 	http.HandleFunc("/add", server.ClientRequest)
-	http.HandleFunc("/addMembers", server.AddMembers)
+	http.HandleFunc("/prepareCommit", server.PrepareCommitGroupChange)
+	http.HandleFunc("/commit", server.CommitGroupChange)
+	http.HandleFunc("/ping", server.RegistryPing)
+	http.HandleFunc("/addOrRemoveMember", server.AddOrRemoveMember)
 	go func() {
 		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", port), nil))
 		wg.Done()

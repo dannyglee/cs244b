@@ -34,15 +34,17 @@ type Node struct {
 
 	rpcClient *HttpClient
 
-	heartbeatIntervalMillis int64
-	electionTimeoutMillis   int64
+	heartbeatIntervalMicros int64
+	electionTimeoutMicros   int64
 	lastUpdateEpoch         int64
 
 	// Always non-zero, unique among cluster.
-	NodeId         int
-	Role           NodeRole
-	ClusterMembers map[int]bool
-	LeaderId       int
+	NodeId                    int
+	Role                      NodeRole
+	ClusterMembers            map[int]string
+	PendingMembers            map[int]string
+	LeaderId                  int
+	membershipChangeTimestamp int64
 
 	// Common state on all nodes.
 	CommitIndex int
@@ -159,7 +161,7 @@ func (node *Node) RequestVote(args *RequestVoteRequest) RequestVoteResponse {
 		nodeLastLogTerm = node.LocalLog[len(node.LocalLog)-1].termReceived
 	}
 	if args.LastLogTerm >= nodeLastLogTerm {
-		node.lastUpdateEpoch = time.Now().UnixMilli()
+		node.lastUpdateEpoch = time.Now().UnixMicro()
 		node.CurrentTerm = args.Term
 		node.VotedFor = args.CandidateId
 		return RequestVoteResponse{node.CurrentTerm, true, false}
@@ -168,33 +170,101 @@ func (node *Node) RequestVote(args *RequestVoteRequest) RequestVoteResponse {
 	}
 }
 
+type PrepareCommitArgs struct {
+	timestamp  int64
+	newMembers map[int]string
+}
+
+func (node *Node) PrepareCommitGroupChange(args *PrepareCommitArgs) bool {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if args.timestamp > node.membershipChangeTimestamp {
+		node.PendingMembers = args.newMembers
+		return true
+	}
+	return false
+}
+
+func (node *Node) CommitGroupChange(timeStamp int64) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if timeStamp == node.membershipChangeTimestamp {
+		node.ClusterMembers = node.PendingMembers
+		node.PendingMembers = make(map[int]string)
+		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
+	}
+}
+
+type AddOrRemoveMemberArgs struct {
+	nodeId         int
+	url            string
+	updatedMembers map[int]string
+	isAddMember    bool
+}
+
+func (node *Node) AddOrRemoveMember(updatedMembers *map[int]string, removeId int) bool {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if len(*updatedMembers) != 0 {
+		node.ClusterMembers = *updatedMembers
+		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
+		return true
+	} else {
+		if removeId == node.NodeId {
+			node.ClusterMembers = make(map[int]string)
+			return true
+		}
+		if _, ok := node.ClusterMembers[removeId]; ok {
+			delete(node.ClusterMembers, removeId)
+			node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
+		}
+		return true
+	}
+}
+
+func (node *Node) RemoveMember(nodeId int) bool {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if nodeId == node.NodeId {
+		node.ClusterMembers = make(map[int]string)
+		return true
+	}
+	if _, ok := node.ClusterMembers[nodeId]; ok {
+		delete(node.ClusterMembers, nodeId)
+		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
+	}
+	return true
+}
+
 // Cluster related methods.
-func (node *Node) Init(nodeId int, url string) {
+func (node *Node) Init(nodeId int, url string, startAsLeader bool) {
 	node.rpcClient = &HttpClient{RegistryUrl: "http://localhost:5000/", NodeId: nodeId}
 	node.NextIndex = make(map[int]int)
 	node.MatchIndex = make(map[int]int)
 	node.LocalLog = []LogEntry{}
-	node.heartbeatIntervalMillis = 50
-	node.electionTimeoutMillis = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200))
+	node.heartbeatIntervalMicros = 50 * 1000
+	node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
 	node.perMemberLock = NewLockMap()
-	node.addToCluster(nodeId, url)
+	node.ClusterMembers = map[int]string{nodeId: url}
+	node.PendingMembers = make(map[int]string)
+	node.membershipChangeTimestamp = time.Now().UnixMicro()
+	node.NodeId = nodeId
+	node.CommitIndex = -1
+	node.LastApplied = -1
+	node.CurrentTerm = 0
+	if !startAsLeader {
+		node.electionTimeoutMicros = 1000 * 1000 * 60 * 5 // 5 minutes.
+	}
 	node.changeToFollower(0)
+	fmt.Println(fmt.Sprintf("RAFT NODE INITIALIZED - nodeId: %d, serving at %s", nodeId, url))
+	fmt.Println("---------------------")
 	go node.ticker()
 }
 
-func (node *Node) AddMembers(newMembers *[]int, newMemberUrls *[]string) {
+func (node *Node) startElection() {
 	node.mu.Lock()
 	defer node.mu.Unlock()
-	for i, nodeId := range *newMembers {
-		node.ClusterMembers[nodeId] = true
-		node.MatchIndex[nodeId] = -1
-		node.NextIndex[nodeId] = len(node.LocalLog)
-		node.rpcClient.NodeUrls[nodeId] = (*newMemberUrls)[i]
-		fmt.Println(fmt.Sprintf("Node %d added to cluster", nodeId))
-	}
-}
-
-func (node *Node) startElection() {
+	epoch := time.Now().UnixMicro()
 	voteCount := 1
 	node.CurrentTerm++
 	node.LeaderId = -1
@@ -205,26 +275,26 @@ func (node *Node) startElection() {
 		lastLogTerm = node.LocalLog[lastLogIndex].termReceived
 	}
 	requestVoteArgs := RequestVoteRequest{CandidateId: node.NodeId, Term: node.CurrentTerm, LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
-	epoch := time.Now().UnixMilli()
 	if voteCount > len(node.ClusterMembers)/2 {
 		node.changeToLeader(epoch)
 		return
 	}
 	for nodeId := range node.ClusterMembers {
 		if nodeId != node.NodeId {
-			go node.handleVoteResult(nodeId, &requestVoteArgs, &voteCount)
+			go node.handleVoteResult(node.ClusterMembers[nodeId], &requestVoteArgs, &voteCount)
 		}
 	}
+	node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
 }
 
-func (node *Node) handleVoteResult(nodeId int, requestVoteArgs *RequestVoteRequest, voteCount *int) {
-	voteResult := node.rpcClient.RequestVote(nodeId, requestVoteArgs)
+func (node *Node) handleVoteResult(nodeUrl string, requestVoteArgs *RequestVoteRequest, voteCount *int) {
+	voteResult := node.rpcClient.RequestVote(nodeUrl, requestVoteArgs)
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	if voteResult.BadRequest || node.Role == Leader {
 		return
 	}
-	epoch := time.Now().UnixMilli()
+	epoch := time.Now().UnixMicro()
 	if node.Role != Candidate {
 		return
 	}
@@ -254,28 +324,28 @@ func (node *Node) changeToFollower(newTerm int) {
 	node.CurrentTerm = newTerm
 	node.Role = Follower
 	node.VotedFor = -1
-	node.lastUpdateEpoch = time.Now().UnixMilli()
+	node.lastUpdateEpoch = time.Now().UnixMicro()
 }
 
 // Single ticker thread to trigger state changes.
 func (node *Node) ticker() {
 	for {
-		epoch := time.Now().UnixMilli()
+		epoch := time.Now().UnixMicro()
 		switch node.Role {
 		case Leader:
-			if epoch >= node.lastUpdateEpoch+node.heartbeatIntervalMillis {
+			if epoch >= node.lastUpdateEpoch+node.heartbeatIntervalMicros {
 				node.mu.Lock()
 				node.leaderSendHeartbeat()
 				node.lastUpdateEpoch = epoch
 				node.mu.Unlock()
 			}
 		case Follower:
-			if epoch >= node.lastUpdateEpoch+node.electionTimeoutMillis {
+			if epoch >= node.lastUpdateEpoch+node.electionTimeoutMicros {
 				fmt.Println("changed to candidate")
 				node.Role = Candidate
 			}
 		case Candidate:
-			if epoch >= node.lastUpdateEpoch+node.electionTimeoutMillis {
+			if epoch >= node.lastUpdateEpoch+node.electionTimeoutMicros {
 				node.startElection()
 				node.lastUpdateEpoch = epoch
 			}
@@ -289,9 +359,7 @@ func (node *Node) leaderSendHeartbeat() {
 	for nodeId := range node.ClusterMembers {
 		if nodeId != node.NodeId {
 			go func(id int) {
-				node.perMemberLock.Lock(id)
 				node.appendEntryForFollower(id, &[]UserCommand{}, &successCount, true)
-				node.perMemberLock.Unlock(id)
 			}(nodeId)
 		}
 	}
@@ -307,33 +375,6 @@ func (node *Node) initializeNextIndex() {
 func (node *Node) initializeMatchIndex() {
 	for id := range node.ClusterMembers {
 		node.MatchIndex[id] = -1
-	}
-}
-
-// Temporary group membership change protocol: wait until all nodes see new member before initialization.
-func (node *Node) addToCluster(nodeId int, url string) {
-	node.mu.Lock()
-	defer node.mu.Unlock()
-	nodes := node.rpcClient.RegisterNewNode(nodeId, url)
-	confirmationChannel := make(chan bool)
-	confirmationCountTarget := len(nodes)
-	for id := range nodes {
-		go node.rpcClient.AddNewMember(id, confirmationChannel)
-	}
-
-	success := waitForCount(confirmationChannel, confirmationCountTarget)
-	if success {
-		nodes[nodeId] = true
-		// TODO: Implement this.
-		node.ClusterMembers = nodes
-		node.NodeId = nodeId
-		node.CommitIndex = -1
-		node.LastApplied = -1
-		node.CurrentTerm = 0
-		fmt.Println(fmt.Sprintf("RAFT NODE INITIALIZED - nodeId: %d, serving at %s", nodeId, url))
-		fmt.Println("---------------------")
-	} else {
-		fmt.Println(fmt.Sprintf("Failed to initialize node %d because cluster membership update failed", nodeId))
 	}
 }
 
@@ -359,9 +400,9 @@ func waitForCount(asyncChannel chan bool, targetCount int) bool {
 
 // Updates lastApplied and applies command to local state machine.
 func (node *Node) HandleExternalCommand(command UserCommand) int {
-	fmt.Println("client request called")
 	if node.Role == Leader {
 		node.mu.Lock()
+		defer node.mu.Unlock()
 		node.LocalLog = append(node.LocalLog, LogEntry{node.CurrentTerm, command})
 		lastLogIndex := len(node.LocalLog) - 1
 		lastLogTerm := 0
@@ -371,7 +412,7 @@ func (node *Node) HandleExternalCommand(command UserCommand) int {
 			lastLogTerm = -1
 		}
 		successCount := 1
-		node.lastUpdateEpoch = time.Now().UnixMilli()
+		node.lastUpdateEpoch = time.Now().UnixMicro()
 		if len(node.ClusterMembers) == 1 {
 			node.CommitIndex++
 			return node.NodeId
@@ -386,7 +427,6 @@ func (node *Node) HandleExternalCommand(command UserCommand) int {
 				node.perMemberLock.Unlock(nodeId)
 			}(id)
 		}
-		node.mu.Unlock()
 		return node.NodeId
 	}
 	return node.LeaderId
@@ -406,7 +446,10 @@ func (node *Node) appendEntryForFollower(targetNodeId int, command *[]UserComman
 	args := AppendEntriesRequest{node.CurrentTerm, node.NodeId, lastLogIndex,
 		lastLogTerm, command, node.CommitIndex}
 	node.mu.Unlock()
-	response := node.rpcClient.AppendEntries(targetNodeId, &args)
+	response := node.rpcClient.AppendEntries(node.ClusterMembers[targetNodeId], &args)
+	if isHeartbeat {
+		return true
+	}
 	node.mu.Lock()
 	if response.BadRequest || node.Role != Leader {
 		node.mu.Unlock()
