@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"math/rand"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -105,8 +107,48 @@ func (server *RaftServer) RegistryPing(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok"))
 }
 
+func (server *RaftServer) GetLeader(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte(fmt.Sprintf("%d", server.Node.GetLeader())))
+}
+
+func (server *RaftServer) GetMembership(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte(fmt.Sprintf("%v", server.Node.GetMembership())))
+}
+
 func blockRequest() {
 	// Assume normal latency dist. with 1.5ms mean and std. dev. of 1ms.
 	latencyMicros := math.Max(rand.NormFloat64()+1.5, 1) * 1000
 	time.Sleep(time.Duration(latencyMicros) * time.Microsecond)
+}
+
+// TODO(jin): move this to a separate file in this package.
+func Run(url string, port string, nodeId int, startAsLeader bool) {
+	fmt.Printf("Process started at %d\n", time.Now().UnixMilli())
+	wg := new(sync.WaitGroup)
+	wg.Add(1)
+	rand.Seed(time.Now().UnixNano())
+	server := RaftServer{}
+	server.Init(int(nodeId), url, true, startAsLeader)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/appendEntries", server.AppendEntries)
+	mux.HandleFunc("/requestVote", server.RequestVote)
+	mux.HandleFunc("/add", server.ClientRequest)
+	mux.HandleFunc("/prepareCommit", server.PrepareCommitGroupChange)
+	mux.HandleFunc("/commit", server.CommitGroupChange)
+	mux.HandleFunc("/ping", server.RegistryPing)
+	mux.HandleFunc("/addMember", server.AddMember)
+	mux.HandleFunc("/removeMember", server.RemoveMember)
+	mux.HandleFunc("/getLeader", server.GetLeader)
+	mux.HandleFunc("/getMembership", server.GetMembership)
+
+	http_server := http.Server {
+		Addr: ":" + port,
+		Handler: mux,
+	}
+	go func() {
+		log.Fatal(http_server.ListenAndServe())
+		wg.Done()
+	}()
+	wg.Wait()
 }

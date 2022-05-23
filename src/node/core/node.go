@@ -431,6 +431,14 @@ func (node *Node) HandleExternalCommand(command UserCommand) int {
 	return node.LeaderId
 }
 
+func (node *Node) GetLeader() int {
+	return node.LeaderId;
+}
+
+func (node *Node) GetMembership() map[int]string {
+	return node.ClusterMembers;
+}
+
 func (node *Node) appendEntryForFollower(targetNodeId, nextIndexDecIfFail int, command *[]LogEntry, successCount *int) bool {
 	node.mu.Lock()
 	lastLogIndex := node.NextIndex[targetNodeId] - 1
