@@ -46,7 +46,7 @@ func main() {
 	wg.Add(2)
 	rand.Seed(time.Now().UnixNano())
 	server := httpserver.RaftServer{}
-	server.Init(int(nodeId), url, false, startAsLeader)
+	server.Init(int(nodeId), url, startAsLeader)
 
 	http.HandleFunc("/appendEntries", server.AppendEntries)
 	http.HandleFunc("/requestVote", server.RequestVote)

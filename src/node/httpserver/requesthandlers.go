@@ -5,33 +5,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
-	"math/rand"
 	"net/http"
 	"strconv"
-	"time"
 )
 
 type RaftServer struct {
-	Node                *core.Node
-	nodeId              int
-	url                 string
-	useSimulatedLatency bool
+	Node   *core.Node
+	nodeId int
+	url    string
 }
 
-func (server *RaftServer) Init(nodeId int, url string, useSimulatedLatency, startAsLeader bool) {
+func (server *RaftServer) Init(nodeId int, url string, startAsLeader bool) {
 	server.nodeId = nodeId
 	server.url = url
 	node := core.Node{}
 	node.Init(nodeId, url, startAsLeader)
 	server.Node = &node
-	server.useSimulatedLatency = useSimulatedLatency
 }
 
 func (server *RaftServer) AppendEntries(w http.ResponseWriter, r *http.Request) {
-	if server.useSimulatedLatency {
-		blockRequest()
-	}
 	defer r.Body.Close()
 	body, _ := io.ReadAll(r.Body)
 	input := core.AppendEntriesRequest{}
@@ -42,9 +34,6 @@ func (server *RaftServer) AppendEntries(w http.ResponseWriter, r *http.Request) 
 }
 
 func (server *RaftServer) RequestVote(w http.ResponseWriter, r *http.Request) {
-	if server.useSimulatedLatency {
-		blockRequest()
-	}
 	defer r.Body.Close()
 	body, _ := io.ReadAll(r.Body)
 	input := core.RequestVoteRequest{}
@@ -56,14 +45,23 @@ func (server *RaftServer) RequestVote(w http.ResponseWriter, r *http.Request) {
 
 func (server *RaftServer) ClientRequest(w http.ResponseWriter, r *http.Request) {
 	command := r.URL.Query().Get("command")
-	leaderId := server.Node.HandleExternalCommand(core.UserCommand(command))
-	w.Write([]byte(fmt.Sprintf("%d", leaderId)))
+	commitChannel := make(chan string, 1)
+	redirectChannel := make(chan string, 1)
+	go server.Node.HandleExternalCommand(core.UserCommand(command), &commitChannel, &redirectChannel)
+	for {
+		select {
+		case url := <-commitChannel:
+			w.Write([]byte(fmt.Sprintf("%s", url)))
+			return
+		case url := <-redirectChannel:
+			http.Get(fmt.Sprintf("%s/add?command=%s", url, command))
+			w.Write([]byte(fmt.Sprintf("%s", url)))
+			return
+		}
+	}
 }
 
 func (server *RaftServer) PrepareCommitGroupChange(w http.ResponseWriter, r *http.Request) {
-	if server.useSimulatedLatency {
-		blockRequest()
-	}
 	defer r.Body.Close()
 	body, _ := io.ReadAll(r.Body)
 	input := core.PrepareCommitArgs{}
@@ -73,17 +71,11 @@ func (server *RaftServer) PrepareCommitGroupChange(w http.ResponseWriter, r *htt
 }
 
 func (server *RaftServer) CommitGroupChange(w http.ResponseWriter, r *http.Request) {
-	if server.useSimulatedLatency {
-		blockRequest()
-	}
 	timeStamp, _ := strconv.ParseInt(r.URL.Query().Get("timestamp"), 10, 64)
 	server.Node.CommitGroupChange(timeStamp)
 }
 
 func (server *RaftServer) AddMember(w http.ResponseWriter, r *http.Request) {
-	if server.useSimulatedLatency {
-		blockRequest()
-	}
 	nodeId, _ := strconv.ParseInt(r.URL.Query().Get("nodeId"), 10, 64)
 	url := r.URL.Query().Get("url")
 	groupMembers := make(map[int]string)
@@ -94,9 +86,6 @@ func (server *RaftServer) AddMember(w http.ResponseWriter, r *http.Request) {
 }
 
 func (server *RaftServer) RemoveMember(w http.ResponseWriter, r *http.Request) {
-	if server.useSimulatedLatency {
-		blockRequest()
-	}
 	nodeId, _ := strconv.ParseInt(r.URL.Query().Get("nodeId"), 10, 64)
 	server.Node.RemoveMember(int(nodeId))
 }
@@ -111,10 +100,4 @@ func (server *RaftServer) Pause(w http.ResponseWriter, r *http.Request) {
 
 func (server *RaftServer) Unpause(w http.ResponseWriter, r *http.Request) {
 	server.Node.Unpause()
-}
-
-func blockRequest() {
-	// Assume normal latency dist. with 1.5ms mean and std. dev. of 1ms.
-	latencyMicros := math.Max(rand.NormFloat64()+1.5, 1) * 1000
-	time.Sleep(time.Duration(latencyMicros) * time.Microsecond)
 }

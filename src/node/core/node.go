@@ -463,7 +463,7 @@ func waitForCount(asyncChannel chan bool, targetCount int) bool {
 // Client related methods.
 
 // Updates lastApplied and applies command to local state machine.
-func (node *Node) HandleExternalCommand(command UserCommand) int {
+func (node *Node) HandleExternalCommand(command UserCommand, commitChannel *chan string, redirectChannel *chan string) bool {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	if node.Role == Leader {
@@ -479,7 +479,8 @@ func (node *Node) HandleExternalCommand(command UserCommand) int {
 		node.lastUpdateEpoch = time.Now().UnixMicro()
 		if len(node.ClusterMembers) == 1 {
 			node.CommitIndex++
-			return node.NodeId
+			*commitChannel <- node.ClusterMembers[node.NodeId]
+			return true
 		}
 		term := node.CurrentTerm
 		for id := range node.ClusterMembers {
@@ -488,23 +489,25 @@ func (node *Node) HandleExternalCommand(command UserCommand) int {
 			}
 			go func(nodeId int) {
 				node.perMemberLock.Lock(nodeId)
-				node.appendEntryForFollower(nodeId, 2, &[]LogEntry{{term, command}}, &successCount)
+				node.appendEntryForFollower(nodeId, 2, &[]LogEntry{{term, command}}, &successCount, commitChannel)
 				node.perMemberLock.Unlock(nodeId)
 			}(id)
 		}
-		return node.NodeId
+		return true
+	} else {
+		*redirectChannel <- node.ClusterMembers[node.LeaderId]
+		return false
 	}
-	return node.LeaderId
 }
 
-func (node *Node) appendEntryForFollower(targetNodeId, nextIndexDecIfFail int, command *[]LogEntry, successCount *int) bool {
+func (node *Node) appendEntryForFollower(targetNodeId, nextIndexDecIfFail int, command *[]LogEntry, successCount *int, commitSignal *chan string) bool {
 	node.mu.Lock()
 	lastLogIndex := node.NextIndex[targetNodeId] - 1
 	lastLogTerm := -1
 	if lastLogIndex >= 0 && lastLogIndex < len(node.LocalLog) {
 		lastLogTerm = node.LocalLog[lastLogIndex].termReceived
 	}
-	if len(node.LocalLog)-1 < lastLogIndex {
+	if len(node.LocalLog)-1 < lastLogIndex || node.Role != Leader {
 		node.mu.Unlock()
 		return false
 	}
@@ -513,7 +516,7 @@ func (node *Node) appendEntryForFollower(targetNodeId, nextIndexDecIfFail int, c
 	node.mu.Unlock()
 	response := node.rpcClient.AppendEntries(node.ClusterMembers[targetNodeId], &args)
 	node.mu.Lock()
-	if response.BadRequest || node.Role != Leader {
+	if response.BadRequest {
 		node.mu.Unlock()
 		return false
 	}
@@ -523,6 +526,7 @@ func (node *Node) appendEntryForFollower(targetNodeId, nextIndexDecIfFail int, c
 		node.MatchIndex[targetNodeId] = lastLogIndex + len(*command)
 		if *successCount > len(node.ClusterMembers)/2 {
 			node.CommitIndex = node.MatchIndex[targetNodeId]
+			*commitSignal <- node.ClusterMembers[node.NodeId]
 		}
 		node.mu.Unlock()
 		return true
@@ -537,7 +541,7 @@ func (node *Node) appendEntryForFollower(targetNodeId, nextIndexDecIfFail int, c
 		unseenLogEntries := node.LocalLog[node.NextIndex[targetNodeId]:prevNextIndex]
 		*command = append(unseenLogEntries, *command...)
 		node.mu.Unlock()
-		return node.appendEntryForFollower(targetNodeId, nextIndexDecIfFail*2, command, successCount)
+		return node.appendEntryForFollower(targetNodeId, nextIndexDecIfFail*2, command, successCount, commitSignal)
 	}
 }
 
