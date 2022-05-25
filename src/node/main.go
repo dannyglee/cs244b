@@ -46,7 +46,7 @@ func main() {
 	wg.Add(2)
 	rand.Seed(time.Now().UnixNano())
 	server := httpserver.RaftServer{}
-	server.Init(int(nodeId), url, true, startAsLeader)
+	server.Init(int(nodeId), url, false, startAsLeader)
 
 	http.HandleFunc("/appendEntries", server.AppendEntries)
 	http.HandleFunc("/requestVote", server.RequestVote)
@@ -56,6 +56,8 @@ func main() {
 	http.HandleFunc("/ping", server.RegistryPing)
 	http.HandleFunc("/addMember", server.AddMember)
 	http.HandleFunc("/removeMember", server.RemoveMember)
+	http.HandleFunc("/pause", server.Pause)
+	http.HandleFunc("/unpause", server.Unpause)
 	go func() {
 		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", port), nil))
 		wg.Done()

@@ -105,6 +105,14 @@ func (server *RaftServer) RegistryPing(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok"))
 }
 
+func (server *RaftServer) Pause(w http.ResponseWriter, r *http.Request) {
+	server.Node.Pause()
+}
+
+func (server *RaftServer) Unpause(w http.ResponseWriter, r *http.Request) {
+	server.Node.Unpause()
+}
+
 func blockRequest() {
 	// Assume normal latency dist. with 1.5ms mean and std. dev. of 1ms.
 	latencyMicros := math.Max(rand.NormFloat64()+1.5, 1) * 1000

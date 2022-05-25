@@ -58,6 +58,9 @@ type Node struct {
 	// Leader specific states.
 	NextIndex  map[int]int
 	MatchIndex map[int]int
+
+	// pause/unpause channels to simulate network delay.
+	pauseChan chan bool
 }
 
 // Request/response data structures.
@@ -133,10 +136,6 @@ func (node *Node) appendEntriesSuccess(args *AppendEntriesRequest) AppendEntries
 }
 
 func (node *Node) applyLog() {
-	if node.LastApplied < node.CommitIndex {
-		fmt.Println(fmt.Sprintf("Log index %d to %d applied at node %d, values are %v",
-			node.LastApplied+1, node.CommitIndex, node.NodeId, node.LocalLog[node.LastApplied+1:node.CommitIndex+1]))
-	}
 	node.LastApplied = node.CommitIndex
 }
 
@@ -188,29 +187,64 @@ func (node *Node) CommitGroupChange(timeStamp int64) {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	if timeStamp == node.membershipChangeTimestamp {
+		toAdd := make(map[int]string)
+		toRemove := make(map[int]string)
+		for oldNodeId := range node.ClusterMembers {
+			if url, ok := node.PendingMembers[oldNodeId]; !ok {
+				toRemove[oldNodeId] = url
+			}
+		}
+		for newNodeId := range node.PendingMembers {
+			if url, ok := node.ClusterMembers[newNodeId]; !ok {
+				toAdd[newNodeId] = url
+			}
+		}
+		for addNodeId := range toAdd {
+			node.NextIndex[addNodeId] = 0
+			node.MatchIndex[addNodeId] = -1
+		}
+		for removeNodeId := range toRemove {
+			delete(node.MatchIndex, removeNodeId)
+			delete(node.NextIndex, removeNodeId)
+		}
 		node.ClusterMembers = node.PendingMembers
 		node.PendingMembers = make(map[int]string)
-		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
+		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*30+150, 100), 200)) * 1000
 	}
 }
 
-func (node *Node) AddMember(newwNodeId int, url string, groupMembers *map[int]string) bool {
+func (node *Node) AddMember(newNodeId int, url string, groupMembers *map[int]string) bool {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	if len(*groupMembers) > 0 {
+		// The [groupMembers] optional parameter contains the full updated cluster members so that
+		// newly added nodes will be updated. This param is only set if newNodeId == node.NodeId.
 		node.ClusterMembers = *groupMembers
 		if node.Role == Leader {
-			node.initializeNextIndex()
 			node.initializeMatchIndex()
+			node.initializeNextIndex()
 		}
-		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
+		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*30+150, 100), 200)) * 1000
 	} else {
-		node.ClusterMembers[newwNodeId] = url
-		if node.Role == Leader {
-			node.NextIndex[newwNodeId] = len(node.LocalLog)
-			node.MatchIndex[newwNodeId] = -1
-		}
-		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
+		go func() {
+			node.perMemberLock.Lock(newNodeId)
+			defer node.perMemberLock.Unlock(newNodeId)
+			node.mu.Lock()
+			defer node.mu.Unlock()
+			// placeholder
+			if node.Role == Leader {
+				commands := getCommandFromEntries(&node.LocalLog)
+				args := AppendEntriesRequest{node.CurrentTerm, node.NodeId, -1,
+					node.CurrentTerm, commands, node.CommitIndex}
+				node.mu.Unlock()
+				node.rpcClient.AppendEntries(url, &args)
+				node.mu.Lock()
+				node.NextIndex[newNodeId] = len(*commands)
+				node.MatchIndex[newNodeId] = len(*commands) - 1
+			}
+			node.ClusterMembers[newNodeId] = url
+			node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*30+150, 100), 200)) * 1000
+		}()
 	}
 	return true
 }
@@ -219,12 +253,13 @@ func (node *Node) RemoveMember(nodeId int) bool {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	if nodeId == node.NodeId {
+		// Removes itself.
 		node.ClusterMembers = make(map[int]string)
 		return true
 	}
 	if _, ok := node.ClusterMembers[nodeId]; ok {
 		delete(node.ClusterMembers, nodeId)
-		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
+		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*30+150, 100), 200)) * 1000
 		if node.Role == Leader {
 			delete(node.MatchIndex, nodeId)
 			delete(node.NextIndex, nodeId)
@@ -233,14 +268,23 @@ func (node *Node) RemoveMember(nodeId int) bool {
 	return true
 }
 
+func (node *Node) Pause() {
+	node.pauseChan <- true
+}
+
+func (node *Node) Unpause() {
+	node.pauseChan <- false
+}
+
 // Cluster related methods.
 func (node *Node) Init(nodeId int, url string, startAsLeader bool) {
 	node.rpcClient = &HttpClient{RegistryUrl: "http://localhost:5000/", NodeId: nodeId}
 	node.NextIndex = make(map[int]int)
 	node.MatchIndex = make(map[int]int)
+	node.pauseChan = make(chan bool)
 	node.LocalLog = []LogEntry{}
-	node.heartbeatIntervalMicros = 50 * 1000
-	node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
+	node.heartbeatIntervalMicros = 30 * 1000
+	node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*30+150, 100), 200)) * 1000
 	node.perMemberLock = NewLockMap()
 	node.ClusterMembers = map[int]string{nodeId: url}
 	node.PendingMembers = make(map[int]string)
@@ -256,6 +300,7 @@ func (node *Node) Init(nodeId int, url string, startAsLeader bool) {
 	fmt.Println(fmt.Sprintf("RAFT NODE INITIALIZED - nodeId: %d, serving at %s", nodeId, url))
 	fmt.Println("---------------------")
 	go node.ticker()
+	go node.pauseListener()
 }
 
 func (node *Node) startElection() {
@@ -281,7 +326,7 @@ func (node *Node) startElection() {
 			go node.handleVoteResult(node.ClusterMembers[nodeId], &requestVoteArgs, &voteCount)
 		}
 	}
-	node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*10+150, 100), 200)) * 1000
+	node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*30+150, 100), 200)) * 1000
 }
 
 func (node *Node) handleVoteResult(nodeUrl string, requestVoteArgs *RequestVoteRequest, voteCount *int) {
@@ -350,14 +395,35 @@ func (node *Node) ticker() {
 	}
 }
 
+func (node *Node) pauseListener() {
+	for {
+		select {
+		case pauseSig := <-node.pauseChan:
+			if pauseSig {
+				node.mu.Lock()
+			} else {
+				node.mu.Unlock()
+			}
+		default:
+			continue
+		}
+	}
+}
+
 // Leader only helper methods
 func (node *Node) leaderSendHeartbeat() {
-	emptyCommand := []LogEntry{}
-	placeholder := 0
+	lastLogIndex := len(node.LocalLog) - 1
+	lastLogTerm := -1
+	emptyCommand := &[]UserCommand{}
+	if lastLogIndex >= 0 && lastLogIndex < len(node.LocalLog) {
+		lastLogTerm = node.LocalLog[lastLogIndex].termReceived
+	}
+	args := AppendEntriesRequest{node.CurrentTerm, node.NodeId, lastLogIndex,
+		lastLogTerm, emptyCommand, node.CommitIndex}
 	for nodeId := range node.ClusterMembers {
 		if nodeId != node.NodeId {
 			go func(id int) {
-				node.appendEntryForFollower(id, 1, &emptyCommand, &placeholder)
+				node.rpcClient.AppendEntries(node.ClusterMembers[id], &args)
 			}(nodeId)
 		}
 	}
@@ -398,9 +464,9 @@ func waitForCount(asyncChannel chan bool, targetCount int) bool {
 
 // Updates lastApplied and applies command to local state machine.
 func (node *Node) HandleExternalCommand(command UserCommand) int {
+	node.mu.Lock()
+	defer node.mu.Unlock()
 	if node.Role == Leader {
-		node.mu.Lock()
-		defer node.mu.Unlock()
 		node.LocalLog = append(node.LocalLog, LogEntry{node.CurrentTerm, command})
 		lastLogIndex := len(node.LocalLog) - 1
 		lastLogTerm := 0
