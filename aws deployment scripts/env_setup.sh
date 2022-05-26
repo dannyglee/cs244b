@@ -15,7 +15,7 @@ sudo yum install git -y
 # need to manually type configure username and password in git
 git clone https://github.com/dannyglee/cs244b.git
 
-# start raft process
+# start raft process, use different scripts for difference nodes
 cd $HOME/go_projects/src/cs244b/aws\ deployment\ scripts/
 sh raft_node_1_start.sh
 

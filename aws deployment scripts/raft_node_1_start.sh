@@ -10,4 +10,4 @@ git pull
 cd src/node
 go install
 # update the flag values when setting it up on difference machines.
-go run . -node_url=http://172.31.15.164 -registry_url=http://172.31.9.26:5000 -service_port=4000 -node_id=1
+go run . -node_url=http://172.31.15.164 -registry_url=http://172.31.9.26:5000 -service_port=4000 -node_id=1 &
