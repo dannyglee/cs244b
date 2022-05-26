@@ -15,11 +15,7 @@ sudo yum install git -y
 # need to manually type configure username and password in git
 git clone https://github.com/dannyglee/cs244b.git
 
-# configure startup script so that raft processes are run on node startup
-cd $HOME/go_projects/src/cs244b/aws\ deployment\ scripts
-# change the file name based on different node
-sudo mv -v raft_node_1_start.sh $HOME
-sudo mv -v raft.service /etc/systemd/system/
-cd $HOME
-sudo mv raft_node_1_start.sh raft_node_start
+# start raft process
+cd $HOME/go_projects/src/cs244b/aws\ deployment\ scripts/
+sh raft_node_1_start.sh
 
