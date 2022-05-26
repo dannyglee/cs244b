@@ -3,12 +3,12 @@ package main
 import (
 	"bufio"
 	"cs244b/src/node/httpserver"
+	"flag"
 	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -38,19 +38,21 @@ func userCommandHandler(server httpserver.RaftServer) {
 
 func main() {
 	fmt.Printf("Process started at %d\n", time.Now().UnixMilli())
-	url := os.Args[1]
-	port := os.Args[2]
-	nodeId, _ := strconv.Atoi(os.Args[3])
-	startAsLeader, _ := strconv.ParseBool(os.Args[4])
+	url := flag.String("node_url", "http://localhost", "the url this node is serving from")
+	port := flag.Int("service_port", 4000, "the TCP port this node is serving from")
+	nodeId := flag.Int("node_id", 0, "the current node's Id in the cluster")
+	standBy := flag.Bool("stand_by", false, "whether to start the node in stand-by mode")
+	registryUrl := flag.String("registry_url", "http://localhost:5000", "the url of the trusted registry")
+	flag.Parse()
 	wg := new(sync.WaitGroup)
 	wg.Add(2)
 	rand.Seed(time.Now().UnixNano())
 	server := httpserver.RaftServer{}
-	server.Init(int(nodeId), url, startAsLeader)
+	server.Init(*nodeId, fmt.Sprintf("%s:%d", *url, *port), *registryUrl, *standBy)
 
 	http.HandleFunc("/appendEntries", server.AppendEntries)
 	http.HandleFunc("/requestVote", server.RequestVote)
-	http.HandleFunc("/add", server.ClientRequest)
+	http.HandleFunc("/add", server.AddLogEntry)
 	http.HandleFunc("/prepareCommit", server.PrepareCommitGroupChange)
 	http.HandleFunc("/commit", server.CommitGroupChange)
 	http.HandleFunc("/ping", server.RegistryPing)
@@ -59,7 +61,7 @@ func main() {
 	http.HandleFunc("/pause", server.Pause)
 	http.HandleFunc("/unpause", server.Unpause)
 	go func() {
-		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", port), nil))
+		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 		wg.Done()
 	}()
 

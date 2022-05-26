@@ -63,7 +63,9 @@ type Node struct {
 	pauseChan chan bool
 }
 
-// Request/response data structures.
+// -------------------------------------------------------------------------------------------------------------------------
+// AppendEntries and helper methods
+// -------------------------------------------------------------------------------------------------------------------------
 type AppendEntriesRequest struct {
 	Term              int
 	LeaderId          int
@@ -79,20 +81,6 @@ type AppendEntriesResponse struct {
 	BadRequest bool
 }
 
-type RequestVoteRequest struct {
-	Term         int
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  int
-}
-
-type RequestVoteResponse struct {
-	Term        int
-	VoteGranted bool
-	BadRequest  bool
-}
-
-// Main APIs.
 func (node *Node) AppendEntries(args *AppendEntriesRequest) AppendEntriesResponse {
 	node.mu.Lock()
 	defer node.mu.Unlock()
@@ -139,6 +127,22 @@ func (node *Node) applyLog() {
 	node.LastApplied = node.CommitIndex
 }
 
+// -------------------------------------------------------------------------------------------------------------------------
+// RequestVote and helper methods
+// -------------------------------------------------------------------------------------------------------------------------
+type RequestVoteRequest struct {
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
+}
+
+type RequestVoteResponse struct {
+	Term        int
+	VoteGranted bool
+	BadRequest  bool
+}
+
 func (node *Node) RequestVote(args *RequestVoteRequest) RequestVoteResponse {
 	node.mu.Lock()
 	defer node.mu.Unlock()
@@ -168,16 +172,16 @@ func (node *Node) RequestVote(args *RequestVoteRequest) RequestVoteResponse {
 	}
 }
 
-type PrepareCommitArgs struct {
-	timestamp  int64
-	newMembers map[int]string
-}
-
-func (node *Node) PrepareCommitGroupChange(args *PrepareCommitArgs) bool {
+// -------------------------------------------------------------------------------------------------------------------------
+// Methods that handle 2PC based cluster membership change.
+// -------------------------------------------------------------------------------------------------------------------------
+func (node *Node) PrepareCommitGroupChange(newMembers *map[int]string, timestamp int64) bool {
 	node.mu.Lock()
 	defer node.mu.Unlock()
-	if args.timestamp > node.membershipChangeTimestamp {
-		node.PendingMembers = args.newMembers
+	if timestamp > node.membershipChangeTimestamp {
+		node.PendingMembers = *newMembers
+		node.membershipChangeTimestamp = timestamp
+		fmt.Println("pending members updated")
 		return true
 	}
 	return false
@@ -189,23 +193,27 @@ func (node *Node) CommitGroupChange(timeStamp int64) {
 	if timeStamp == node.membershipChangeTimestamp {
 		toAdd := make(map[int]string)
 		toRemove := make(map[int]string)
-		for oldNodeId := range node.ClusterMembers {
-			if url, ok := node.PendingMembers[oldNodeId]; !ok {
+		for oldNodeId, url := range node.ClusterMembers {
+			if _, ok := node.PendingMembers[oldNodeId]; !ok {
 				toRemove[oldNodeId] = url
 			}
 		}
-		for newNodeId := range node.PendingMembers {
-			if url, ok := node.ClusterMembers[newNodeId]; !ok {
+		for newNodeId, url := range node.PendingMembers {
+			if _, ok := node.ClusterMembers[newNodeId]; !ok {
 				toAdd[newNodeId] = url
 			}
 		}
-		for addNodeId := range toAdd {
-			node.NextIndex[addNodeId] = 0
-			node.MatchIndex[addNodeId] = -1
+		for addNodeId, url := range toAdd {
+			go node.updateNewNode(addNodeId, url)
 		}
 		for removeNodeId := range toRemove {
 			delete(node.MatchIndex, removeNodeId)
 			delete(node.NextIndex, removeNodeId)
+			if removeNodeId == node.NodeId {
+				// Removes itself.
+				node.reset()
+				return
+			}
 		}
 		node.ClusterMembers = node.PendingMembers
 		node.PendingMembers = make(map[int]string)
@@ -213,6 +221,9 @@ func (node *Node) CommitGroupChange(timeStamp int64) {
 	}
 }
 
+// -------------------------------------------------------------------------------------------------------------------------
+// Methods that handle single node cluster membership change.
+// -------------------------------------------------------------------------------------------------------------------------
 func (node *Node) AddMember(newNodeId int, url string, groupMembers *map[int]string) bool {
 	node.mu.Lock()
 	defer node.mu.Unlock()
@@ -227,23 +238,8 @@ func (node *Node) AddMember(newNodeId int, url string, groupMembers *map[int]str
 		node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*30+150, 100), 200)) * 1000
 	} else {
 		go func() {
-			node.perMemberLock.Lock(newNodeId)
-			defer node.perMemberLock.Unlock(newNodeId)
-			node.mu.Lock()
-			defer node.mu.Unlock()
-			// placeholder
-			if node.Role == Leader {
-				commands := getCommandFromEntries(&node.LocalLog)
-				args := AppendEntriesRequest{node.CurrentTerm, node.NodeId, -1,
-					node.CurrentTerm, commands, node.CommitIndex}
-				node.mu.Unlock()
-				node.rpcClient.AppendEntries(url, &args)
-				node.mu.Lock()
-				node.NextIndex[newNodeId] = len(*commands)
-				node.MatchIndex[newNodeId] = len(*commands) - 1
-			}
+			node.updateNewNode(newNodeId, url)
 			node.ClusterMembers[newNodeId] = url
-			node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*30+150, 100), 200)) * 1000
 		}()
 	}
 	return true
@@ -254,7 +250,7 @@ func (node *Node) RemoveMember(nodeId int) bool {
 	defer node.mu.Unlock()
 	if nodeId == node.NodeId {
 		// Removes itself.
-		node.ClusterMembers = make(map[int]string)
+		node.reset()
 		return true
 	}
 	if _, ok := node.ClusterMembers[nodeId]; ok {
@@ -268,6 +264,46 @@ func (node *Node) RemoveMember(nodeId int) bool {
 	return true
 }
 
+func (node *Node) updateNewNode(nodeId int, url string) {
+	node.perMemberLock.Lock(nodeId)
+	defer node.perMemberLock.Unlock(nodeId)
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if node.Role == Leader {
+		node.NextIndex[nodeId] = len(node.LocalLog)
+		node.MatchIndex[nodeId] = -1
+		commands := getCommandFromEntries(&node.LocalLog)
+		args := AppendEntriesRequest{node.CurrentTerm, node.NodeId, -1,
+			node.CurrentTerm, commands, node.CommitIndex}
+		fmt.Printf("update node %d at %s\n", nodeId, url)
+		node.mu.Unlock()
+		node.rpcClient.AppendEntries(url, &args)
+		node.mu.Lock()
+		node.NextIndex[nodeId] = len(*commands)
+		node.MatchIndex[nodeId] = len(*commands) - 1
+	}
+	node.electionTimeoutMicros = int64(math.Min(math.Max(rand.NormFloat64()*30+150, 100), 200)) * 1000
+}
+
+// helper method to reset node state. May be called when the current node is removed from cluster, or when the [Reset]
+// endpoint is called.
+func (node *Node) reset() {
+	ownUrl := node.ClusterMembers[node.NodeId]
+	node.ClusterMembers = make(map[int]string)
+	node.ClusterMembers[node.NodeId] = ownUrl
+	node.CurrentTerm = 0
+	node.electionTimeoutMicros = 1000 * 1000 * 60 * 60 * 24 * 365
+	node.Role = Follower
+	node.LeaderId = -1
+	node.VotedFor = -1
+	node.LocalLog = []LogEntry{}
+	node.CommitIndex = -1
+	node.LastApplied = -1
+}
+
+// -------------------------------------------------------------------------------------------------------------------------
+// Helper methods to simulate network partition/recovery, and node reset. Only used for our experiment.
+// -------------------------------------------------------------------------------------------------------------------------
 func (node *Node) Pause() {
 	node.pauseChan <- true
 }
@@ -276,9 +312,20 @@ func (node *Node) Unpause() {
 	node.pauseChan <- false
 }
 
-// Cluster related methods.
-func (node *Node) Init(nodeId int, url string, startAsLeader bool) {
-	node.rpcClient = &HttpClient{RegistryUrl: "http://localhost:5000/", NodeId: nodeId}
+// When this method is called, it's the same effect as killing/restarting the RAFT node process.
+func (node *Node) Reset() {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	node.reset()
+}
+
+// -------------------------------------------------------------------------------------------------------------------------
+// Initializes node state when they first come online. Nodes always start as followers. [standBy] parameter
+// determines whether the node sets the timeout upon initialization. If set to true, it will remain in Follower state until
+// it's local cluster is updated. This is to "warm" the nodes before the registry adds them to the cluster.
+// -------------------------------------------------------------------------------------------------------------------------
+func (node *Node) Init(nodeId int, url, registryUrl string, standBy bool) {
+	node.rpcClient = &HttpClient{RegistryUrl: registryUrl, NodeId: nodeId}
 	node.NextIndex = make(map[int]int)
 	node.MatchIndex = make(map[int]int)
 	node.pauseChan = make(chan bool)
@@ -293,8 +340,10 @@ func (node *Node) Init(nodeId int, url string, startAsLeader bool) {
 	node.CommitIndex = -1
 	node.LastApplied = -1
 	node.CurrentTerm = 0
-	if !startAsLeader {
-		node.electionTimeoutMicros = 1000 * 1000 * 60 * 5 // 5 minutes.
+	if standBy {
+		// If [standBy] is set to true, we intentionally keep node as follower to prepare for
+		// membership update from registry.
+		node.electionTimeoutMicros = 1000 * 1000 * 60 * 60 * 24 * 365
 	}
 	node.changeToFollower(0)
 	fmt.Println(fmt.Sprintf("RAFT NODE INITIALIZED - nodeId: %d, serving at %s", nodeId, url))
@@ -303,6 +352,9 @@ func (node *Node) Init(nodeId int, url string, startAsLeader bool) {
 	go node.pauseListener()
 }
 
+// -------------------------------------------------------------------------------------------------------------------------
+// Election related methods.
+// -------------------------------------------------------------------------------------------------------------------------
 func (node *Node) startElection() {
 	node.mu.Lock()
 	defer node.mu.Unlock()
@@ -351,6 +403,9 @@ func (node *Node) handleVoteResult(nodeUrl string, requestVoteArgs *RequestVoteR
 	}
 }
 
+// -------------------------------------------------------------------------------------------------------------------------
+// Helper methods to handle role change.
+// -------------------------------------------------------------------------------------------------------------------------
 func (node *Node) changeToLeader(epoch int64) {
 	fmt.Println(fmt.Sprintf("Node %d elected leader", node.NodeId))
 	node.Role = Leader
@@ -369,7 +424,22 @@ func (node *Node) changeToFollower(newTerm int) {
 	node.lastUpdateEpoch = time.Now().UnixMicro()
 }
 
-// Single ticker thread to trigger state changes.
+func (node *Node) initializeNextIndex() {
+	index := len(node.LocalLog)
+	for id := range node.ClusterMembers {
+		node.NextIndex[id] = index
+	}
+}
+
+func (node *Node) initializeMatchIndex() {
+	for id := range node.ClusterMembers {
+		node.MatchIndex[id] = -1
+	}
+}
+
+// -------------------------------------------------------------------------------------------------------------------------
+// Background threads that handle heartbeat, election timeout, and pause/unpause signals.
+// -------------------------------------------------------------------------------------------------------------------------
 func (node *Node) ticker() {
 	for {
 		epoch := time.Now().UnixMicro()
@@ -410,7 +480,6 @@ func (node *Node) pauseListener() {
 	}
 }
 
-// Leader only helper methods
 func (node *Node) leaderSendHeartbeat() {
 	lastLogIndex := len(node.LocalLog) - 1
 	lastLogTerm := -1
@@ -429,41 +498,10 @@ func (node *Node) leaderSendHeartbeat() {
 	}
 }
 
-func (node *Node) initializeNextIndex() {
-	index := len(node.LocalLog)
-	for id := range node.ClusterMembers {
-		node.NextIndex[id] = index
-	}
-}
-
-func (node *Node) initializeMatchIndex() {
-	for id := range node.ClusterMembers {
-		node.MatchIndex[id] = -1
-	}
-}
-
-func waitForCount(asyncChannel chan bool, targetCount int) bool {
-	totalCount := 0
-	successCount := 0
-	if targetCount == 0 {
-		return true
-	}
-	for i := range asyncChannel {
-		if i {
-			successCount++
-		}
-		totalCount++
-		if totalCount >= targetCount {
-			break
-		}
-	}
-	return totalCount == successCount
-}
-
-// Client related methods.
-
-// Updates lastApplied and applies command to local state machine.
-func (node *Node) HandleExternalCommand(command UserCommand, commitChannel *chan string, redirectChannel *chan string) bool {
+// -------------------------------------------------------------------------------------------------------------------------
+// Leader methods that processe external request to add & replicate log entry to the cluster.
+// -------------------------------------------------------------------------------------------------------------------------
+func (node *Node) HandleAddLogEntry(command UserCommand, commitChannel *chan string, redirectChannel *chan string) bool {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	if node.Role == Leader {
@@ -480,6 +518,7 @@ func (node *Node) HandleExternalCommand(command UserCommand, commitChannel *chan
 		if len(node.ClusterMembers) == 1 {
 			node.CommitIndex++
 			*commitChannel <- node.ClusterMembers[node.NodeId]
+			node.applyLog()
 			return true
 		}
 		term := node.CurrentTerm
