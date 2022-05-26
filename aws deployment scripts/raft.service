@@ -1,0 +1,9 @@
+[Unit]
+Description=Power-off gpu
+
+[Service]
+Type=oneshot
+ExecStart=$HOME/raft_node_start
+
+[Install]
+WantedBy=multi-user.target
