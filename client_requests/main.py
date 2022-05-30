@@ -97,28 +97,6 @@ def updateGroup(node_ids):
     return
 
 
-async def appendEntriesLoop():
-    print("Entered appendEntriesLoop")
-    while True:
-        active_node_id = selectActiveNodeId()
-        if active_node_id == -1:
-            continue
-        try:
-            appendEntries(active_node_id)
-        except:
-            continue
-        # await asyncio.sleep(0.025)
-
-
-async def membershipChangeUpdateGroup():
-    print("Enter membership change update group")
-    await asyncio.sleep(120)
-    for node_id in ["1", "2", "3"]:
-        removeSingleMember(node_id)
-    for node_id in ["4", "5", "6"]:
-        addSingleMember(node_id)
-
-
 def part1():
     """
     Part 1:
@@ -130,6 +108,30 @@ def part1():
 
     (run append entries in parallel)
     """
+
+    async def appendEntriesLoop():
+        # TODO: Increase QPS to 100.
+        while True:
+            active_node_id = selectActiveNodeId()
+            if active_node_id == -1:
+                continue
+            try:
+                appendEntries(active_node_id)
+            except:
+                continue
+        return
+
+    async def membershipChangeUpdateGroup():
+        print("Enter membership change update group")
+        await asyncio.sleep(120)
+        for node_id in ["1", "2", "3"]:
+            removeSingleMember(node_id)
+            await asyncio.sleep(1)
+        for node_id in ["4", "5", "6"]:
+            addSingleMember(node_id)
+            await asyncio.sleep(1)
+        return
+
     for node_id in ["1", "2", "3"]:
         addSingleMember(node_id)
 
@@ -150,7 +152,7 @@ def part2():
         time.sleep(1)
 
     time.sleep(60)
-    print("Begin appendEntriesLoop")
+    # TODO: Increase QPS to 100.
     while True:
         active_node_id = selectActiveNodeId()
         if active_node_id == -1:
