@@ -103,8 +103,8 @@ def part1():
     3 members in cluster
     run at capacity for 5 minutes
 
-    -> 1) updateGroup() (nodes 4, 5, 6)
-    -> 2) remove and add consequtively (remove 1, 2, 3, add 4, 5, 6)
+    -> a) updateGroup() (nodes 4, 5, 6)
+    -> b) remove and add consequtively (remove 1, 2, 3, add 4, 5, 6)
 
     (run append entries in parallel)
     """
@@ -151,6 +151,7 @@ def part2():
         addSingleMember(str(node_id))
         time.sleep(1)
 
+    # Manually kill registry through AWS shell.
     time.sleep(60)
     # TODO: Increase QPS to 100.
     while True:
@@ -162,8 +163,8 @@ def part2():
 
 
 def main():
-    part1()
-    # part2()
+    # part1()
+    part2()
     return
 
 
