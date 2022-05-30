@@ -19,11 +19,11 @@ def removeSingleMember(node_id):
     )
     elapsed_seconds = response.elapsed.total_seconds()
 
-    active_node_ids.remove(node_id)
-
     time = datetime.datetime.now(datetime.timezone.utc).astimezone()
     if DEBUG:
         print(time.isoformat(), "remove membership", elapsed_seconds * 1000)
+
+    active_node_ids.remove(node_id)
 
     return
 
@@ -51,7 +51,6 @@ def appendEntries(node_id):
 
     writer.writerow([time.isoformat(), "appendEntries", elapsed_seconds * 1000])
     if DEBUG:
-        print(f"appendEntries: {node_id}, {response.content}")
         print(time.isoformat(), "appendEntries", elapsed_seconds * 1000)
 
     return
@@ -71,8 +70,7 @@ def addSingleMember(node_id):
 
     writer.writerow([time.isoformat(), " add membership", elapsed_seconds * 1000])
 
-    if node_id in constants.PUBLIC_NODE_IPS.keys():
-        active_node_ids.append(node_id)
+    active_node_ids.append(node_id)
 
     return
 
@@ -119,10 +117,8 @@ def part1():
                 appendEntries(active_node_id)
             except:
                 continue
-        return
 
     async def membershipChangeUpdateGroup():
-        print("Enter membership change update group")
         await asyncio.sleep(120)
         for node_id in ["1", "2", "3"]:
             removeSingleMember(node_id)
@@ -165,7 +161,6 @@ def part2():
 def main():
     # part1()
     part2()
-    return
 
 
 if __name__ == "__main__":
