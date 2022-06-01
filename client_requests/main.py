@@ -1,11 +1,15 @@
+from concurrent.futures import thread
 import requests
 import constants
 import datetime
 import asyncio
 import time
 import csv
+import aiohttp
+import asyncio
+import threading
 
-DEBUG = False
+DEBUG = True
 active_node_ids = []
 
 f = open("without_registry.csv", "w")
@@ -50,6 +54,7 @@ def appendEntries(node_id):
     time = datetime.datetime.now(datetime.timezone.utc).astimezone()
 
     writer.writerow([time.isoformat(), "appendEntries", elapsed_seconds * 1000])
+
     if DEBUG:
         print(time.isoformat(), "appendEntries", elapsed_seconds * 1000)
 
@@ -65,10 +70,10 @@ def addSingleMember(node_id):
     elapsed_seconds = response.elapsed.total_seconds()
     time = datetime.datetime.now(datetime.timezone.utc).astimezone()
 
+    writer.writerow([time.isoformat(), " add membership", elapsed_seconds * 1000])
+
     if DEBUG:
         print(time.isoformat(), "membership", elapsed_seconds * 1000)
-
-    writer.writerow([time.isoformat(), " add membership", elapsed_seconds * 1000])
 
     active_node_ids.append(node_id)
 
@@ -106,35 +111,51 @@ def part1():
 
     (run append entries in parallel)
     """
-
     async def appendEntriesLoop():
         # TODO: Increase QPS to 100.
-        while True:
-            active_node_id = selectActiveNodeId()
-            if active_node_id == -1:
-                continue
-            try:
-                appendEntries(active_node_id)
-            except:
-                continue
+        async with aiohttp.ClientSession() as session:
+            while True:
+                node_id = selectActiveNodeId()
+                if node_id == -1:
+                    continue
+                public_node_ip = constants.PUBLIC_NODE_IPS[node_id]
+                command = "test"
+                start = time.time()
+                async with session.get(
+                    f"http://{public_node_ip}:{constants.NODE_PORT}/add?command={command}"
+                ) as resp:
+                    end = time.time()
+                    current_time = datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).astimezone()
+                    writer.writerow(
+                        [current_time.isoformat(), "appendEntries", end - start]
+                    )
+                    if DEBUG:
+                        print(current_time.isoformat(), "appendEntries", end - start)
 
-    async def membershipChangeUpdateGroup():
-        await asyncio.sleep(120)
+    def between_callback():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(appendEntriesLoop())
+        loop.close()
+
+    def membershipChangeUpdateGroup():
+        time.sleep(20)
+        print("started membership changes")
         for node_id in ["1", "2", "3"]:
             removeSingleMember(node_id)
-            await asyncio.sleep(1)
+            time.sleep(1)
         for node_id in ["4", "5", "6"]:
             addSingleMember(node_id)
-            await asyncio.sleep(1)
+            time.sleep(1)
         return
 
     for node_id in ["1", "2", "3"]:
         addSingleMember(node_id)
 
-    async def part1a():
-        await asyncio.gather(appendEntriesLoop(), membershipChangeUpdateGroup())
-
-    asyncio.run(part1a())
+    threading.Thread(target=between_callback).start()
+    threading.Thread(membershipChangeUpdateGroup())
 
 
 def part2():
@@ -148,19 +169,37 @@ def part2():
         time.sleep(1)
 
     # Manually kill registry through AWS shell.
-    time.sleep(60)
+    time.sleep(10)
     # TODO: Increase QPS to 100.
-    while True:
-        active_node_id = selectActiveNodeId()
-        if active_node_id == -1:
-            print(active_node_ids)
-            continue
-        appendEntries(active_node_id)
+    async def appendEntriesLoop():
+        async with aiohttp.ClientSession() as session:
+            while True:
+                node_id = selectActiveNodeId()
+                if node_id == -1:
+                    continue
+                public_node_ip = constants.PUBLIC_NODE_IPS[node_id]
+                command = "test"
+                start = time.time()
+                async with session.get(
+                    f"http://{public_node_ip}:{constants.NODE_PORT}/add?command={command}"
+                ) as resp:
+                    end = time.time()
+                    current_time = datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).astimezone()
+                    writer.writerow(
+                        [current_time.isoformat(), "appendEntries", end - start]
+                    )
+                    if DEBUG:
+                        print(current_time.isoformat(), "appendEntries", end - start)
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(appendEntriesLoop())
 
 
 def main():
-    # part1()
-    part2()
+    part1()
+    # part2()
 
 
 if __name__ == "__main__":
