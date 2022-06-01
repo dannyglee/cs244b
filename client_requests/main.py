@@ -9,7 +9,7 @@ import aiohttp
 import asyncio
 import threading
 
-DEBUG = True
+DEBUG = False
 active_node_ids = []
 
 
@@ -83,14 +83,13 @@ def updateGroup(node_ids):
         body[
             node_id
         ] = f"http://{constants.PRIVATE_NODE_IPS[node_id]}:{constants.NODE_PORT}"
-
     response = requests.post(
         f"http://{constants.PUBLIC_REGISTRY_IP}:{constants.REGISTRY_PORT}/updateGroup",
-        data=body,
+        json=body
     )
     elapsed_seconds = response.elapsed.total_seconds()
     time = datetime.datetime.now(datetime.timezone.utc).astimezone()
-
+    writer.writerow([time.isoformat(), "membership", elapsed_seconds * 1000])
     if DEBUG:
         print(time.isoformat(), "membership", elapsed_seconds * 1000)
 
@@ -139,14 +138,16 @@ def part1():
         loop.close()
 
     def membershipChangeUpdateGroup():
-        time.sleep(20)
+        print("stuff")
+        time.sleep(120)
         print("started membership changes")
-        for node_id in ["1", "2", "3"]:
-            removeSingleMember(node_id)
-            time.sleep(1)
-        for node_id in ["4", "5", "6"]:
-            addSingleMember(node_id)
-            time.sleep(1)
+        updateGroup(["4","5","6"])
+        # for node_id in ["4", "5", "6"]:
+        #     addSingleMember(node_id)
+        #     time.sleep(1)
+        # for node_id in ["1", "2", "3"]:
+        #     removeSingleMember(node_id)
+        #     time.sleep(1)
         return
 
     for node_id in ["1", "2", "3"]:
