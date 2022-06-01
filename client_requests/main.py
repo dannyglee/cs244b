@@ -12,9 +12,6 @@ import threading
 DEBUG = True
 active_node_ids = []
 
-f = open("without_registry.csv", "w")
-writer = csv.writer(f)
-
 
 def removeSingleMember(node_id):
     private_node_ip = constants.PRIVATE_NODE_IPS[node_id]
@@ -70,7 +67,7 @@ def addSingleMember(node_id):
     elapsed_seconds = response.elapsed.total_seconds()
     time = datetime.datetime.now(datetime.timezone.utc).astimezone()
 
-    writer.writerow([time.isoformat(), " add membership", elapsed_seconds * 1000])
+    writer.writerow([time.isoformat(), "membership", elapsed_seconds * 1000])
 
     if DEBUG:
         print(time.isoformat(), "membership", elapsed_seconds * 1000)
@@ -111,6 +108,7 @@ def part1():
 
     (run append entries in parallel)
     """
+
     async def appendEntriesLoop():
         # TODO: Increase QPS to 100.
         async with aiohttp.ClientSession() as session:
@@ -203,4 +201,9 @@ def main():
 
 
 if __name__ == "__main__":
+    csv_file_name = input("csv file name? ")
+    if not csv_file_name.endswith(".csv"):
+        csv_file_name += ".csv"
+    f = open(csv_file_name, "w")
+    writer = csv.writer(f)
     main()
