@@ -187,6 +187,16 @@ func (registry *Registry) addOrRemoveSingleMember(isAdd, isFailureDetection bool
 	}
 }
 
+func (registry *Registry) reset() {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	for _, targetUrl := range registry.currentMembers {
+		go func(url string) {
+			http.Get(fmt.Sprintf("%s/reset", url))
+		}(targetUrl)
+	}
+}
+
 // -------------------------------------------------------------------------------------------------
 // RAFT node http interface.
 // -------------------------------------------------------------------------------------------------
@@ -260,6 +270,11 @@ func (registry *Registry) HandleRemoveSingleMember(w http.ResponseWriter, r *htt
 	nodeId, _ := strconv.ParseInt(r.URL.Query().Get("nodeId"), 10, 0)
 	result := registry.addOrRemoveSingleMember(false, false, int(nodeId), "")
 	w.Write([]byte(fmt.Sprintf("%t", result)))
+}
+
+func (registry *Registry) Reset(w http.ResponseWriter, r *http.Request) {
+	registry.reset()
+	w.Write([]byte("OK"))
 }
 
 // -------------------------------------------------------------------------------------------------

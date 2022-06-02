@@ -27,6 +27,7 @@ func main() {
 	http.HandleFunc("/addSingleMember", registry.HandleAddSingleMember)
 	http.HandleFunc("/removeSingleMember", registry.HandleRemoveSingleMember)
 	http.HandleFunc("/updateGroup", registry.HandleMembershipChange)
+	http.HandleFunc("/reset", registry.Reset)
 
 	go func() {
 		log.Fatal(http.ListenAndServe(":5000", nil))

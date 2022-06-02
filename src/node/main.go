@@ -60,6 +60,7 @@ func main() {
 	http.HandleFunc("/removeMember", server.RemoveMember)
 	http.HandleFunc("/pause", server.Pause)
 	http.HandleFunc("/unpause", server.Unpause)
+	http.HandleFunc("/reset", server.Reset)
 	go func() {
 		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 		wg.Done()
