@@ -1,0 +1,4 @@
+from(bucket: "cs244b")
+    |> range(start: -48h)
+    |> filter(fn: (r) => r._measurement == "diagram2_total")
+    |> aggregateWindow(every: 1m, fn: mean)
