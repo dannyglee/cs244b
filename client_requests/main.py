@@ -198,10 +198,124 @@ def part2():
     loop = asyncio.get_event_loop()
     loop.run_until_complete(appendEntriesLoop())
 
+def part1_accelerated():
+    """
+    Part 1:
+    3 members in cluster
+    run at capacity for 5 minutes
+
+    -> a) updateGroup() (nodes 4, 5, 6)
+    -> b) remove and add consequtively (remove 1, 2, 3, add 4, 5, 6)
+
+    (run append entries in parallel)
+    """
+    async def appendEntries(session):
+        node_id = selectActiveNodeId()
+        if node_id == -1:
+            return
+        public_node_ip = constants.PUBLIC_NODE_IPS[node_id]
+        command = "test"
+        start = time.time()
+        async with session.get(
+            f"http://{public_node_ip}:{constants.NODE_PORT}/add?command={command}"
+        ) as resp:
+            result = await resp.text()
+            end = time.time()
+            current_time = (
+                standard_start + (datetime.datetime.now() - start_time)
+            ).astimezone()
+            writer.writerow(
+                [csv_file_name, current_time.isoformat(), "appendEntries", end - start]
+            )
+            if DEBUG:
+                print(current_time.isoformat(), "appendEntries", end - start)
+
+    async def appendEntriesLoop():
+        async with aiohttp.ClientSession() as session:
+            i = 0
+            tasks = []
+            while i < 1000:
+                task = asyncio.ensure_future(appendEntries(session))
+                tasks.append(task)
+                i += 1
+            await asyncio.gather(*tasks)
+
+    def between_callback():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(appendEntriesLoop())
+        loop.close()
+
+    def membershipChangeUpdateGroup():
+        time.sleep(1)
+        print("started membership changes")
+        # updateGroup(["4","5","6"])
+        for node_id in ["4", "5", "6"]:
+            addSingleMember(node_id)
+        for node_id in ["1", "2", "3"]:
+            removeSingleMember(node_id)
+        return
+
+    for node_id in ["1", "2", "3"]:
+        addSingleMember(node_id)
+
+    threading.Thread(target=between_callback).start()
+    # threading.Thread(target=between_callback).start()
+    # threading.Thread(target=between_callback).start()
+    # threading.Thread(target=between_callback).start()
+    # threading.Thread(target=between_callback).start()
+    threading.Thread(membershipChangeUpdateGroup())
+
+def part2_accelerated():
+    """
+    Part 2:
+    initialize all 7 members -> manually kill registry through AWS shell
+    test appendEntries
+    """
+    for node_id in range(1, 6):
+        addSingleMember(str(node_id))
+        time.sleep(0.1)
+
+    # Manually kill registry through AWS shell.
+    time.sleep(1)
+    async def appendEntries(session):
+        node_id = "2"
+        public_node_ip = constants.PUBLIC_NODE_IPS["2"]
+        command = "test"
+        start = time.time()
+        async with session.get(
+            f"http://{public_node_ip}:{constants.NODE_PORT}/add?command={command}"
+        ) as resp:
+            result = await resp.text()
+            end = time.time()
+            current_time = (
+                standard_start + (datetime.datetime.now() - start_time)
+            ).astimezone()
+            writer.writerow(
+                [csv_file_name, current_time.isoformat(), "appendEntries", end - start]
+            )
+            if DEBUG:
+                print(current_time.isoformat(), "appendEntries", end - start)
+
+    async def appendEntriesLoop():
+        async with aiohttp.ClientSession() as session:
+            i = 0
+            tasks = []
+            while i < 1000:
+                task = asyncio.ensure_future(appendEntries(session))
+                tasks.append(task)
+                i += 1
+            await asyncio.gather(*tasks)
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(appendEntriesLoop())
+
 
 def main():
     # part1()
     part2()
+    # part1_accelerated()
+    # part2_accelerated()
 
 
 if __name__ == "__main__":
